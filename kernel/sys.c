@@ -1265,6 +1265,16 @@ static __always_inline bool fake_uname_task(void)
 {
 	const char *comm = current->comm;
 
+	/*
+	 * Only the real system daemons (root) qualify.  Any app can rename its own
+	 * comm to "bpfloader" via prctl(PR_SET_NAME) and then compare uname()
+	 * before/after the rename to detect this fake (Hunter does exactly that:
+	 * it renames itself to "bpfloader" and reports "detected linux uname
+	 * spoofing" when the release changes).
+	 */
+	if (current_uid().val != 0)
+		return false;
+
 	return !strcmp(comm, "bpfloader") ||
 	       !strcmp(comm, "netbpfload") ||
 	       !strcmp(comm, "netd") ||
