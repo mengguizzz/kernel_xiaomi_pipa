@@ -1281,6 +1281,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	susfs_spoof_uname(&tmp);
+#endif
 #ifndef CONFIG_FAKE_UNAME_NONE
 	if (unlikely(fake_uname))
 		strscpy(tmp.release, FAKE_UNAME, sizeof(tmp.release));

@@ -1554,7 +1554,17 @@ static const struct apsd_result *smblib_update_usb_type(struct smb_charger *chg)
 				(!chg->qc3p5_supported || chg->qc3p5_auth_complete ||
 				 apsd_result->pst != POWER_SUPPLY_TYPE_USB_HVDCP_3)) {
 			chg->real_charger_type = apsd_result->pst;
-			chg->usb_psy_desc.type = apsd_result->pst;
+			/*
+			 * portcolor: ColorOS 的 USB UI（com.oplus.systemui.usb.UsbService）
+			 * 用 BatteryManager.getPlugged()==BATTERY_PLUGGED_USB 判断"连的是电脑"，
+			 * 而健康 HAL 会把内核报的 USB_CDP 当成 AC 充电器 -> 判不出 USB，
+			 * 于是插电脑不弹"USB 用途"。
+			 * 这里保持 real_charger_type=CDP（充电电流策略完全不改），
+			 * 只把对外的 psy 类型报成 USB，让框架认为是数据连接。
+			 */
+			chg->usb_psy_desc.type =
+				(apsd_result->pst == POWER_SUPPLY_TYPE_USB_CDP) ?
+				POWER_SUPPLY_TYPE_USB : apsd_result->pst;
 		}
 	}
 
