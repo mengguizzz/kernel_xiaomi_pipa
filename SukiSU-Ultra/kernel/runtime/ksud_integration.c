@@ -471,6 +471,17 @@ static void ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *
 
 static unsigned int volumedown_pressed_count = 0;
 
+/*
+ * portcolor: only sample volume-down during early boot.
+ *
+ * The stock code relied on unregister_kprobe() from post-fs-data, but the
+ * kprobe kept firing long after boot, so pressing volume-down 3-4 times while
+ * the device was already in use flipped KernelSU into safe mode.  Count only
+ * within an early window and stop counting the moment the hook is stopped.
+ */
+static bool volumedown_counting = true;
+static unsigned long volumedown_deadline;
+
 static bool is_volumedown_enough(unsigned int count)
 {
     return count >= 3;
@@ -478,15 +489,20 @@ static bool is_volumedown_enough(unsigned int count)
 
 int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value)
 {
+    if (!volumedown_counting)
+        return 0;
+    if (volumedown_deadline && time_after(jiffies, volumedown_deadline)) {
+        volumedown_counting = false;
+        return 0;
+    }
     if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
         int val = *value;
-        pr_info("KEY_VOLUMEDOWN val: %d\n", val);
+
         if (val) {
-            // key pressed, count it
+            /* key pressed, count it */
             volumedown_pressed_count += 1;
-            if (is_volumedown_enough(volumedown_pressed_count)) {
+            if (is_volumedown_enough(volumedown_pressed_count))
                 ksu_stop_input_hook_runtime();
-            }
         }
     }
 
@@ -496,10 +512,12 @@ int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *v
 bool ksu_is_safe_mode()
 {
     static bool safe_mode = false;
-    if (safe_mode) {
-        // don't need to check again, userspace may call multiple times
-        return true;
-    }
+    /* portcolor: freeze the verdict - later queries must not re-read the count */
+    static bool safe_mode_evaluated = false;
+
+    if (safe_mode_evaluated)
+        return safe_mode;
+    safe_mode_evaluated = true;
 
     if (ksu_late_loaded) {
         return false;
@@ -642,6 +660,8 @@ void ksu_stop_input_hook_runtime(void)
         return;
     }
     input_hook_stopped = true;
+    /* portcolor: stop counting right away even if unregister_kprobe is late */
+    volumedown_counting = false;
     bool ret = schedule_work(&stop_input_hook_work);
     pr_info("unregister input kprobe: %d!\n", ret);
 }
@@ -656,6 +676,8 @@ void __init ksu_ksud_init()
 
     ret = register_kprobe(&input_event_kp);
     pr_info("ksud: input_event_kp: %d\n", ret);
+    /* portcolor: only the first 30s after init count for the safe-mode check */
+    volumedown_deadline = jiffies + 30 * HZ;
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
 }
