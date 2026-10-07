@@ -1855,14 +1855,19 @@ static int pd_policy_parse_dt(struct usbpd_pm *pdpm)
 		pr_err("therm-level-threshold missing, use default val\n");
 	pr_info("therm-level-threshold:%d\n", pdpm->therm_level_threshold);
 
-	pdpm->fc2_exit_vbat_hys_mv = VBAT_HIGH_FOR_FC_HYS_MV;
+	/*
+	 * portcolor: pipa's DT lives in the dtbo partition, which we do not flash,
+	 * so the mi,fc2-exit-* properties are absent and the defaults below decide
+	 * the behaviour.  Match the intended values (40 mV / 98%) here.
+	 */
+	pdpm->fc2_exit_vbat_hys_mv = 40;
 	rc = of_property_read_u32(node, "mi,fc2-exit-vbat-hys-mv",
 			&pdpm->fc2_exit_vbat_hys_mv);
 	if (rc < 0)
 		pr_err("fc2-exit-vbat-hys-mv missing, use default val\n");
 	pr_info("fc2-exit-vbat-hys-mv:%d\n", pdpm->fc2_exit_vbat_hys_mv);
 
-	pdpm->fc2_exit_soc = CAPACITY_TOO_HIGH_THR;
+	pdpm->fc2_exit_soc = 98;
 	rc = of_property_read_u32(node, "mi,fc2-exit-soc",
 			&pdpm->fc2_exit_soc);
 	if (rc < 0)
