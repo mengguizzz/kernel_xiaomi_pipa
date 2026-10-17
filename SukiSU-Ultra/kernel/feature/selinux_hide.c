@@ -1147,6 +1147,216 @@ allow:
     goto out;
 }
 #endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
+#include "objsec.h"
+#include "hook/patch_memory.h"
+#include "ksu.h"
+#include "policy/feature.h"
+
+/*
+ * Linux 4.19 stores the SELinux status page in selinux_state.ss rather than
+ * directly in selinux_state.  Keep this first backport deliberately narrow:
+ * only app-visible status queries are redirected.  Policy/context/access
+ * emulation needs a full selinux_ss/policydb snapshot and is left disabled.
+ */
+static DEFINE_MUTEX(selinux_hide_mutex);
+static DEFINE_MUTEX(fake_status_mutex);
+static bool ksu_selinux_hide_enabled __read_mostly;
+static bool ksu_selinux_hide_running __read_mostly;
+static struct page *fake_status;
+
+typedef int (*sel_open_handle_status_fn)(struct inode *inode, struct file *filp);
+static sel_open_handle_status_fn orig_sel_open_handle_status;
+static sel_open_handle_status_fn *sel_open_handle_status_slot;
+extern struct file_operations *selinux_get_status_ops(void);
+
+static int initialize_fake_status(void)
+{
+    struct selinux_kernel_status *status;
+    struct selinux_kernel_status *new_status;
+    struct page *real_status;
+    struct page *new_page;
+
+    mutex_lock(&fake_status_mutex);
+    if (fake_status) {
+        mutex_unlock(&fake_status_mutex);
+        return 0;
+    }
+
+    real_status = selinux_kernel_status_page(&selinux_state);
+    if (!real_status) {
+        mutex_unlock(&fake_status_mutex);
+        return -ENOMEM;
+    }
+
+    new_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    if (!new_page) {
+        mutex_unlock(&fake_status_mutex);
+        return -ENOMEM;
+    }
+
+    status = page_address(real_status);
+    new_status = page_address(new_page);
+    memcpy(new_status, status, sizeof(*new_status));
+
+    /* Hide permissive/debug boots from unprivileged callers. */
+    WRITE_ONCE(new_status->enforcing, 1);
+    smp_store_release(&fake_status, new_page);
+    mutex_unlock(&fake_status_mutex);
+
+    pr_info("selinux_hide: fake status initialized: sequence=%u policyload=%u enforcing=%u\n",
+            READ_ONCE(new_status->sequence), READ_ONCE(new_status->policyload),
+            READ_ONCE(new_status->enforcing));
+    return 0;
+}
+
+static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
+{
+    struct page *data = NULL;
+    int ret;
+
+    if (likely(current_uid().val >= 10000 && READ_ONCE(ksu_selinux_hide_enabled)))
+        data = smp_load_acquire(&fake_status);
+
+    if (data) {
+        filp->private_data = data;
+        return 0;
+    }
+
+    ret = orig_sel_open_handle_status(inode, filp);
+    if (!ret && current_uid().val >= 10000 && READ_ONCE(ksu_selinux_hide_enabled) &&
+        !smp_load_acquire(&fake_status)) {
+        initialize_fake_status();
+        data = smp_load_acquire(&fake_status);
+        if (data)
+            filp->private_data = data;
+    }
+    return ret;
+}
+
+static int hook_selinux_status_open(void)
+{
+    sel_open_handle_status_fn new_fn = my_sel_open_handle_status;
+    struct file_operations *ops;
+    int ret;
+
+    if (orig_sel_open_handle_status)
+        return 0;
+
+    if (!sel_open_handle_status_slot) {
+        ops = selinux_get_status_ops();
+        if (!ops) {
+            pr_err("selinux_hide: sel_handle_status_ops not found\n");
+            return -ENOENT;
+        }
+        sel_open_handle_status_slot = &ops->open;
+    }
+
+    orig_sel_open_handle_status = *sel_open_handle_status_slot;
+    ret = ksu_patch_text(sel_open_handle_status_slot, &new_fn, sizeof(new_fn),
+                         KSU_PATCH_TEXT_FLUSH_DCACHE);
+    if (ret) {
+        pr_err("selinux_hide: failed to hook status open: %d\n", ret);
+        sel_open_handle_status_slot = NULL;
+        orig_sel_open_handle_status = NULL;
+    }
+    return ret;
+}
+
+static void unhook_selinux_status_open(void)
+{
+    int ret;
+
+    if (!sel_open_handle_status_slot || !orig_sel_open_handle_status)
+        return;
+
+    ret = ksu_patch_text(sel_open_handle_status_slot, &orig_sel_open_handle_status,
+                         sizeof(orig_sel_open_handle_status), KSU_PATCH_TEXT_FLUSH_DCACHE);
+    if (ret) {
+        pr_err("selinux_hide: failed to restore status open: %d\n", ret);
+        return;
+    }
+    orig_sel_open_handle_status = NULL;
+}
+
+static int ksu_selinux_hide_enable(void)
+{
+    int ret;
+
+    if (ksu_selinux_hide_running)
+        return 0;
+
+    ret = hook_selinux_status_open();
+    if (ret)
+        return ret;
+
+    /*
+     * The first app open retries this while SELinuxfs is still coming up.
+     * A failure here is therefore only advisory.
+     */
+    initialize_fake_status();
+    ksu_selinux_hide_running = true;
+    pr_info("selinux_hide: status-only backport enabled\n");
+    return 0;
+}
+
+static void ksu_selinux_hide_disable(void)
+{
+    if (!ksu_selinux_hide_running)
+        return;
+    ksu_selinux_hide_running = false;
+    unhook_selinux_status_open();
+    pr_info("selinux_hide: status-only backport disabled\n");
+}
+
+static int selinux_hide_feature_get(u64 *value)
+{
+    *value = READ_ONCE(ksu_selinux_hide_enabled) ? 1 : 0;
+    return 0;
+}
+
+static int selinux_hide_feature_set(u64 value)
+{
+    bool enable = value != 0;
+    int ret = 0;
+
+    mutex_lock(&selinux_hide_mutex);
+    if (enable) {
+        ret = ksu_selinux_hide_enable();
+        if (!ret)
+            WRITE_ONCE(ksu_selinux_hide_enabled, true);
+    } else {
+        WRITE_ONCE(ksu_selinux_hide_enabled, false);
+        ksu_selinux_hide_disable();
+    }
+    mutex_unlock(&selinux_hide_mutex);
+    return ret;
+}
+
+static const struct ksu_feature_handler selinux_hide_handler = {
+    .feature_id = KSU_FEATURE_SELINUX_HIDE,
+    .name = "selinux_hide",
+    .get_handler = selinux_hide_feature_get,
+    .set_handler = selinux_hide_feature_set,
+};
+
+void __init ksu_selinux_hide_init(void)
+{
+    if (ksu_register_feature_handler(&selinux_hide_handler))
+        pr_err("selinux_hide: failed to register feature handler\n");
+    else
+        pr_info("selinux_hide: 4.19 status-only backport initialized\n");
+}
+
+void __exit ksu_selinux_hide_exit(void)
+{
+    mutex_lock(&selinux_hide_mutex);
+    WRITE_ONCE(ksu_selinux_hide_enabled, false);
+    ksu_selinux_hide_disable();
+    mutex_unlock(&selinux_hide_mutex);
+    ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
+}
+
 #else
 void ksu_selinux_hide_init(void) {}
 void ksu_selinux_hide_exit(void) {}

@@ -272,6 +272,11 @@ static const struct file_operations sel_handle_status_ops = {
 	.llseek		= generic_file_llseek,
 };
 
+struct file_operations *selinux_get_status_ops(void)
+{
+	return (struct file_operations *)&sel_handle_status_ops;
+}
+
 #ifdef CONFIG_SECURITY_SELINUX_DISABLE
 static ssize_t sel_write_disable(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
