@@ -9,6 +9,9 @@
 #include <linux/path.h>
 #include <linux/printk.h>
 #include <linux/types.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
 
 #include "feature/kernel_umount.h"
 #include "klog.h" // IWYU pragma: keep
@@ -109,6 +112,10 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
     }
     // umount the target mnt
     pr_info("handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
+
+#ifdef CONFIG_KSU_SUSFS
+    susfs_set_current_proc_umounted();
+#endif
 
     const struct cred *saved = override_creds(ksu_cred);
 

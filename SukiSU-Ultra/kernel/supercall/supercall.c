@@ -49,8 +49,12 @@ struct ksu_install_fd_tw {
 #define SukiCMD_ADD_MAP 0x60020
 
 struct suki_susfs_path { char path[256]; int err; };
-struct suki_susfs_uname { char release[65]; char version[65]; int err; };
-struct suki_susfs_log { u32 enabled; int err; };
+struct suki_susfs_open_redirect {
+    char target_pathname[256];
+    char redirected_pathname[256];
+    u32 uid_scheme;
+    int err;
+};
 struct suki_susfs_kstat {
     u32 is_statically;
     u64 target_ino;
@@ -70,64 +74,38 @@ struct suki_susfs_kstat {
     u32 flags;
     int err;
 };
-struct suki_susfs_version { char value[16]; int err; };
-struct suki_susfs_features { char value[8192]; int err; };
 
-static int susfs_call_kernel_ptr(int (*fn)(void __user *), void *ptr)
+static void susfs_call_v2(void (*fn)(void __user **), void __user *arg)
 {
     mm_segment_t old_fs = get_fs();
-    int ret;
+    void __user *ptr = arg;
 
     set_fs(KERNEL_DS);
-    ret = fn((void __user *)ptr);
+    fn(&ptr);
     set_fs(old_fs);
-    return ret;
 }
 
-static int susfs_add_path_compat(void __user *arg)
+static int susfs_add_path_compat(void __user *arg, bool loop)
 {
     struct suki_susfs_path in;
     struct st_susfs_sus_path old = { 0 };
     struct path path;
+    void __user *ptr;
 
     if (copy_from_user(&in, arg, sizeof(in)))
         return -EFAULT;
+    in.path[sizeof(in.path) - 1] = '\0';
     strlcpy(old.target_pathname, in.path, sizeof(old.target_pathname));
     in.err = kern_path(old.target_pathname, LOOKUP_FOLLOW, &path);
-    if (!in.err) {
-        old.target_ino = d_inode(path.dentry)->i_ino;
-        path_put(&path);
-        in.err = susfs_call_kernel_ptr((int (*)(void __user *))susfs_add_sus_path, &old);
-    }
-    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-}
+    if (in.err)
+        return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
+    old.target_ino = d_inode(path.dentry)->i_ino;
+    old.i_uid = current_uid().val;
+    path_put(&path);
 
-static int susfs_set_uname_compat(void __user *arg)
-{
-    struct suki_susfs_uname in;
-    struct st_susfs_uname old = { 0 };
-
-    if (copy_from_user(&in, arg, sizeof(in)))
-        return -EFAULT;
-    strlcpy(old.sysname, "default", sizeof(old.sysname));
-    strlcpy(old.nodename, "default", sizeof(old.nodename));
-    strlcpy(old.release, in.release, sizeof(old.release));
-    strlcpy(old.version, in.version, sizeof(old.version));
-    strlcpy(old.machine, "default", sizeof(old.machine));
-    in.err = susfs_call_kernel_ptr((int (*)(void __user *))susfs_set_uname, &old);
-    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-}
-
-static int susfs_add_mount_compat(void __user *arg)
-{
-    struct suki_susfs_path in;
-    struct st_susfs_sus_mount old = { 0 };
-
-    if (copy_from_user(&in, arg, sizeof(in)))
-        return -EFAULT;
-    strlcpy(old.target_pathname, in.path, sizeof(old.target_pathname));
-    in.err = susfs_call_kernel_ptr((int (*)(void __user *))susfs_add_sus_mount,
-                                   &old);
+    ptr = (void __user *)&old;
+    susfs_call_v2(loop ? susfs_add_sus_path_loop : susfs_add_sus_path, ptr);
+    in.err = old.err;
     return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
 
@@ -135,67 +113,73 @@ static int susfs_kstat_compat(void __user *arg, bool update)
 {
     struct suki_susfs_kstat in;
     struct st_susfs_sus_kstat old = { 0 };
+    void __user *ptr;
 
     if (copy_from_user(&in, arg, sizeof(in)))
         return -EFAULT;
+    old.is_statically = in.is_statically;
     old.target_ino = (unsigned long)in.target_ino;
     strlcpy(old.target_pathname, in.target_pathname,
             sizeof(old.target_pathname));
     old.spoofed_ino = (unsigned long)in.spoofed_ino;
     old.spoofed_dev = (unsigned long)in.spoofed_dev;
     old.spoofed_nlink = in.spoofed_nlink;
+    old.spoofed_size = in.spoofed_size;
     old.spoofed_atime_tv_sec = (long)in.spoofed_atime_tv_sec;
     old.spoofed_atime_tv_nsec = (long)in.spoofed_atime_tv_nsec;
     old.spoofed_mtime_tv_sec = (long)in.spoofed_mtime_tv_sec;
     old.spoofed_mtime_tv_nsec = (long)in.spoofed_mtime_tv_nsec;
     old.spoofed_ctime_tv_sec = (long)in.spoofed_ctime_tv_sec;
     old.spoofed_ctime_tv_nsec = (long)in.spoofed_ctime_tv_nsec;
-    in.err = susfs_call_kernel_ptr(
-        (int (*)(void __user *))(update ? susfs_update_sus_kstat :
-                                         susfs_add_sus_kstat),
-        &old);
+    old.spoofed_blocks = in.spoofed_blocks;
+    old.spoofed_blksize = (unsigned long)in.spoofed_blksize;
+    ptr = (void __user *)&old;
+    susfs_call_v2(update ? susfs_update_sus_kstat : susfs_add_sus_kstat,
+                  ptr);
+    in.err = old.err;
     return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
 
-static void susfs_write_status(void __user *arg, const char *value, size_t size)
+static int susfs_open_redirect_compat(void __user *arg)
 {
-    char *out = kzalloc(size, GFP_ATOMIC);
+    struct suki_susfs_open_redirect in;
+    struct st_susfs_open_redirect old = { 0 };
+    struct path path;
+    void __user *ptr;
 
-    if (!out)
-        return;
-    strlcpy(out, value, size - sizeof(int));
-    *(int *)(out + size - sizeof(int)) = 0;
-    copy_to_user(arg, out, size);
-    kfree(out);
+    if (copy_from_user(&in, arg, sizeof(in)))
+        return -EFAULT;
+    in.target_pathname[sizeof(in.target_pathname) - 1] = '\0';
+    in.redirected_pathname[sizeof(in.redirected_pathname) - 1] = '\0';
+    in.err = kern_path(in.target_pathname, LOOKUP_FOLLOW, &path);
+    if (in.err)
+        return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
+    old.target_ino = d_inode(path.dentry)->i_ino;
+    path_put(&path);
+    strlcpy(old.target_pathname, in.target_pathname,
+            sizeof(old.target_pathname));
+    strlcpy(old.redirected_pathname, in.redirected_pathname,
+            sizeof(old.redirected_pathname));
+    ptr = (void __user *)&old;
+    susfs_call_v2(susfs_add_open_redirect, ptr);
+    in.err = old.err;
+    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
 
 static void susfs_handle_reboot(unsigned int cmd, void __user *arg)
 {
-    struct suki_susfs_log toggle;
-
     if (current_uid().val != 0 || !arg)
         return;
+
     switch (cmd) {
     case SukiCMD_ADD_PATH:
+        susfs_add_path_compat(arg, false);
+        break;
     case SukiCMD_ADD_PATH_LOOP:
-        susfs_add_path_compat(arg);
-        break;
-    case SukiCMD_SET_UNAME:
-        susfs_set_uname_compat(arg);
-        break;
-    case SukiCMD_ENABLE_LOG:
-        if (!copy_from_user(&toggle, arg, sizeof(toggle))) {
-            susfs_set_log(toggle.enabled != 0);
-            toggle.err = 0;
-            copy_to_user(arg, &toggle, sizeof(toggle));
-        }
+        susfs_add_path_compat(arg, true);
         break;
     case SukiCMD_HIDE_MOUNTS:
-        if (!copy_from_user(&toggle, arg, sizeof(toggle))) {
-            susfs_set_hide_mounts_for_root(toggle.enabled != 0);
-            toggle.err = 0;
-            copy_to_user(arg, &toggle, sizeof(toggle));
-        }
+        susfs_call_v2(susfs_set_hide_sus_mnts_for_all_procs, arg);
         break;
     case SukiCMD_ADD_KSTAT:
     case SukiCMD_ADD_KSTAT_STATIC:
@@ -204,18 +188,32 @@ static void susfs_handle_reboot(unsigned int cmd, void __user *arg)
     case SukiCMD_UPDATE_KSTAT:
         susfs_kstat_compat(arg, true);
         break;
-    case SukiCMD_ADD_MAP:
-        susfs_add_mount_compat(arg);
+    case SukiCMD_SET_UNAME:
+        susfs_call_v2(susfs_set_uname, arg);
+        break;
+    case SukiCMD_ENABLE_LOG:
+        susfs_call_v2(susfs_enable_log, arg);
+        break;
+    case SukiCMD_SET_CMDLINE:
+        susfs_call_v2(susfs_set_cmdline_or_bootconfig, arg);
+        break;
+    case SukiCMD_OPEN_REDIRECT:
+        susfs_open_redirect_compat(arg);
         break;
     case SukiCMD_SHOW_VERSION:
-        susfs_write_status(arg, "v1.5.5-k419", sizeof(struct suki_susfs_version));
-        break;
-    case SukiCMD_SHOW_VARIANT:
-        susfs_write_status(arg, "NON-GKI", sizeof(struct suki_susfs_version));
+        susfs_call_v2(susfs_show_version, arg);
         break;
     case SukiCMD_SHOW_FEATURES:
-        susfs_write_status(arg, "sus_path,sus_mount,sus_kstat,spoof_uname",
-                           sizeof(struct suki_susfs_features));
+        susfs_call_v2(susfs_get_enabled_features, arg);
+        break;
+    case SukiCMD_SHOW_VARIANT:
+        susfs_call_v2(susfs_show_variant, arg);
+        break;
+    case SukiCMD_AVC_SPOOF:
+        susfs_call_v2(susfs_set_avc_log_spoofing, arg);
+        break;
+    case SukiCMD_ADD_MAP:
+        susfs_call_v2(susfs_add_sus_map, arg);
         break;
     default:
         break;

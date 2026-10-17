@@ -5,6 +5,8 @@
 #include <linux/seq_file.h>
 
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+extern int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
+
 /*
  * Hide the unlocked/AVB state from ordinary apps: they read /proc/cmdline and
  * would otherwise see androidboot.verifiedbootstate=orange.  Only apps
@@ -20,6 +22,11 @@ static const char *susfs_spoof_find(const char *s, const char *pat)
 static int cmdline_proc_show(struct seq_file *m, void *v)
 {
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	if (!susfs_spoof_cmdline_or_bootconfig(m)) {
+		seq_putc(m, '\n');
+		return 0;
+	}
+
 	if (current_uid().val >= 2000) {
 		const char *pat = "androidboot.verifiedbootstate=";
 		const char *hit = susfs_spoof_find(saved_command_line, pat);

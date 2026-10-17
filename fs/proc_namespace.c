@@ -12,16 +12,18 @@
 #include <linux/security.h>
 #include <linux/fs_struct.h>
 #include <linux/sched/task.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_def.h>
+#endif
 
 #include "proc/internal.h" /* only for get_proc_task() in ->open() */
 
 #include "pnode.h"
 #include "internal.h"
 
-#ifdef CONFIG_KSU_SUSFS
-#include <linux/susfs.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_hide_sus_mnts_for_all_procs;
 #endif
-
 
 static __poll_t mounts_poll(struct file *file, poll_table *wait)
 {
@@ -108,8 +110,9 @@ static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_sus_mount(mnt, &p->root))
+	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_KSU_MNT_ID) {
 		return 0;
+	}
 #endif
 
 	if (sb->s_op->show_devname) {
@@ -148,25 +151,11 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
 	int err;
 
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
-	int out_mnt_id = 0, out_parent_mnt_id = 0;
-	int status = 1;
-#endif
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_sus_mount(mnt, &p->root))
+	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_KSU_MNT_ID) {
 		return 0;
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
-	if (!uid_matches_proc_need_to_reorder_mnt_id())
-		goto orig_flow;
-	status = susfs_get_fake_mnt_id(r->mnt_id, &out_mnt_id, &out_parent_mnt_id);
-	if (status)
-		goto orig_flow;
-	seq_printf(m, "%i %i %u:%u ", out_mnt_id, out_parent_mnt_id,
-				MAJOR(sb->s_dev), MINOR(sb->s_dev));
-	goto bypass_orig_flow;
-orig_flow:
-#endif //#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
-#endif //#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	}
+#endif
 	seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,
 		   MAJOR(sb->s_dev), MINOR(sb->s_dev));
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT_MNT_ID_REORDER
@@ -236,8 +225,9 @@ static int show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_sus_mount(mnt, &p->root))
+	if (susfs_hide_sus_mnts_for_all_procs && r->mnt_id >= DEFAULT_KSU_MNT_ID) {
 		return 0;
+	}
 #endif
 
 	/* device */

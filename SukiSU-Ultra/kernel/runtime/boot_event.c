@@ -13,6 +13,7 @@
 
 bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;
+bool susfs_is_boot_completed_triggered __read_mostly = false;
 
 void on_post_fs_data(void)
 {
@@ -65,6 +66,7 @@ void on_module_mounted(void)
 void on_boot_completed(void)
 {
     ksu_boot_completed = true;
+    susfs_is_boot_completed_triggered = true;
     pr_info("on_boot_completed!\n");
     track_throne(true);
     ksu_selinux_hide_drop_backup_if_unused();
