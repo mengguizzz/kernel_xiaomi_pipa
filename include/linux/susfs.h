@@ -18,27 +18,6 @@
 /*********/
 /* MACRO */
 /*********/
-#define getname_safe(name) (name == NULL ? ERR_PTR(-EINVAL) : getname(name))
-#define putname_safe(name) (IS_ERR(name) ? NULL : putname(name))
-
-/* Compatibility helpers retained for the pipa SukiSU integration. */
-#define SYSCALL_FAMILY_ALL_ENOENT 0
-#define SYSCALL_FAMILY_OPENAT 1
-#define SYSCALL_FAMILY_MKNOD 2
-#define SYSCALL_FAMILY_MKDIRAT 3
-#define SYSCALL_FAMILY_RMDIR 4
-#define SYSCALL_FAMILY_UNLINKAT 5
-#define SYSCALL_FAMILY_SYMLINKAT_NEWNAME 6
-#define SYSCALL_FAMILY_LINKAT_OLDNAME 7
-#define SYSCALL_FAMILY_LINKAT_NEWNAME 8
-#define SYSCALL_FAMILY_RENAMEAT2_OLDNAME 9
-#define SYSCALL_FAMILY_RENAMEAT2_NEWNAME 10
-#define SYSCALL_FAMILY_TRUNCATE 11
-#define SYSCALL_FAMILY_FACCESSAT 12
-#define SYSCALL_FAMILY_CHDIR 13
-
-struct stat;
-
 /**********/
 /* STRUCT */
 /**********/
@@ -190,10 +169,6 @@ struct st_susfs_version {
 void susfs_set_i_state_on_external_dir(void __user **user_info);
 void susfs_add_sus_path(void __user **user_info);
 void susfs_add_sus_path_loop(void __user **user_info);
-int susfs_sus_path_by_path(const struct path *file,
-			   int *errno_to_be_changed, int syscall_family);
-int susfs_sus_path_by_filename(struct filename *name,
-			       int *errno_to_be_changed, int syscall_family);
 #endif
 /* sus_mount */
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -206,7 +181,6 @@ void susfs_add_sus_kstat(void __user **user_info);
 void susfs_update_sus_kstat(void __user **user_info);
 void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat);
 void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino);
-void susfs_sus_kstat(unsigned long ino, struct stat *out_stat);
 #endif
 /* spoof_uname */
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME

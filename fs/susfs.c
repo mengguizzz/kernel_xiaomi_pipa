@@ -358,36 +358,6 @@ bool susfs_is_inode_sus_path(struct inode *inode) {
 }
 #endif
 
-int susfs_sus_path_by_path(const struct path *file,
-			   int *errno_to_be_changed, int syscall_family)
-{
-	if (!file || !file->dentry || !file->dentry->d_inode)
-		return 0;
-
-	if (susfs_is_inode_sus_path(file->dentry->d_inode)) {
-		if (errno_to_be_changed)
-			*errno_to_be_changed = -ENOENT;
-		return 1;
-	}
-	return 0;
-}
-
-int susfs_sus_path_by_filename(struct filename *name,
-			       int *errno_to_be_changed, int syscall_family)
-{
-	struct path path;
-	int status;
-
-	if (IS_ERR_OR_NULL(name))
-		return 0;
-	if (kern_path(name->name, LOOKUP_FOLLOW, &path))
-		return 0;
-	status = susfs_sus_path_by_path(&path, errno_to_be_changed,
-					syscall_family);
-	path_put(&path);
-	return status;
-}
-
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 /* sus_mount */
@@ -604,13 +574,6 @@ void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned 
 	}
 }
 
-void susfs_sus_kstat(unsigned long ino, struct stat *out_stat)
-{
-	/*
-	 * generic_fillattr() already applies spoofed attributes.  Keep this
-	 * legacy entry point as a no-op for callers retained from SUSFS 1.5.
-	 */
-}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 
 /* spoof_uname */
