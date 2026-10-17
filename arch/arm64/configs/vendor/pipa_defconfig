@@ -803,3 +803,6 @@ CONFIG_TECHPACK_CAMERA_XIAOMI_TABLET=y
 CONFIG_OPLUS_FEATURE_VIRTUAL_NET=y
 CONFIG_DIAG_CHAR=y
 # CONFIG_SCHED_DEBUG is not set
+
+# portcolor: AF_VSOCK for perfetto traced (fixes traced crash-loop)
+CONFIG_VSOCKETS=y
