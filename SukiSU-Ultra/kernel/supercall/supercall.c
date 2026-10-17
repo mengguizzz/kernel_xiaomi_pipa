@@ -77,8 +77,15 @@ struct suki_susfs_kstat {
 
 static void susfs_call_v2(void (*fn)(void __user **), void __user *arg)
 {
-    mm_segment_t old_fs = get_fs();
     void __user *ptr = arg;
+
+    fn(&ptr);
+}
+
+static void susfs_call_v2_local(void (*fn)(void __user **), void *arg)
+{
+    mm_segment_t old_fs = get_fs();
+    void __user *ptr = (void __user *)arg;
 
     set_fs(KERNEL_DS);
     fn(&ptr);
@@ -90,7 +97,6 @@ static int susfs_add_path_compat(void __user *arg, bool loop)
     struct suki_susfs_path in;
     struct st_susfs_sus_path old = { 0 };
     struct path path;
-    void __user *ptr;
 
     if (copy_from_user(&in, arg, sizeof(in)))
         return -EFAULT;
@@ -103,8 +109,8 @@ static int susfs_add_path_compat(void __user *arg, bool loop)
     old.i_uid = current_uid().val;
     path_put(&path);
 
-    ptr = (void __user *)&old;
-    susfs_call_v2(loop ? susfs_add_sus_path_loop : susfs_add_sus_path, ptr);
+    susfs_call_v2_local(loop ? susfs_add_sus_path_loop :
+                               susfs_add_sus_path, &old);
     in.err = old.err;
     return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
@@ -113,7 +119,6 @@ static int susfs_kstat_compat(void __user *arg, bool update)
 {
     struct suki_susfs_kstat in;
     struct st_susfs_sus_kstat old = { 0 };
-    void __user *ptr;
 
     if (copy_from_user(&in, arg, sizeof(in)))
         return -EFAULT;
@@ -133,9 +138,8 @@ static int susfs_kstat_compat(void __user *arg, bool update)
     old.spoofed_ctime_tv_nsec = (long)in.spoofed_ctime_tv_nsec;
     old.spoofed_blocks = in.spoofed_blocks;
     old.spoofed_blksize = (unsigned long)in.spoofed_blksize;
-    ptr = (void __user *)&old;
-    susfs_call_v2(update ? susfs_update_sus_kstat : susfs_add_sus_kstat,
-                  ptr);
+    susfs_call_v2_local(update ? susfs_update_sus_kstat :
+                                susfs_add_sus_kstat, &old);
     in.err = old.err;
     return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
@@ -145,7 +149,6 @@ static int susfs_open_redirect_compat(void __user *arg)
     struct suki_susfs_open_redirect in;
     struct st_susfs_open_redirect old = { 0 };
     struct path path;
-    void __user *ptr;
 
     if (copy_from_user(&in, arg, sizeof(in)))
         return -EFAULT;
@@ -160,8 +163,7 @@ static int susfs_open_redirect_compat(void __user *arg)
             sizeof(old.target_pathname));
     strlcpy(old.redirected_pathname, in.redirected_pathname,
             sizeof(old.redirected_pathname));
-    ptr = (void __user *)&old;
-    susfs_call_v2(susfs_add_open_redirect, ptr);
+    susfs_call_v2_local(susfs_add_open_redirect, &old);
     in.err = old.err;
     return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
 }
