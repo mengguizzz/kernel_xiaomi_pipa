@@ -3703,6 +3703,7 @@ static int32_t nvt_ts_suspend(struct device *dev)
 	NVT_LOG("start\n");
 
 	bTouchIsAwake = 0;
+	dsi_panel_doubleclick_enable(true);
 
 	if (ts->db_wakeup & 0x01 || ts->db_wakeup & 0x02) {
 		/*---write command to enter "wakeup gesture mode"---*/
@@ -3712,7 +3713,11 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		buf[1] = 0x13;
 		CTP_SPI_WRITE(ts->client, buf, 2);
 
-		enable_irq_wake(ts->client->irq);
+		ret = enable_irq_wake(ts->client->irq);
+		if (!ret)
+			ts->irq_wake_enabled = true;
+		else
+			NVT_ERR("enable irq wake failed. ret=%d\n", ret);
 
 		enable = (ts->db_wakeup & 0x02);
 		memset(buf, 0, sizeof(buf));
@@ -3723,10 +3728,12 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		CTP_SPI_WRITE(ts->client, buf, 3);
 		NVT_LOG("%s pen wakeup gesture\n", enable ? "Enable" : "Disable");
 	} else if (ts->db_wakeup == 0) {
-		/*---write command to enter "deep sleep mode"---*/
-		buf[0] = EVENT_MAP_HOST_CMD;
-		buf[1] = 0x11;
-		CTP_SPI_WRITE(ts->client, buf, 2);
+		NVT_LOG("enter deep sleep while keeping TDDI rails alive\n");
+		if (nvt_write_addr(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD,
+				   0x11) < 0)
+			NVT_ERR("enter touch deep sleep failed\n");
+		else
+			ts->force_fw_reload = true;
 		if (ts->ts_pinctrl) {
 			ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_suspend);
 			if (ret < 0) {
@@ -3790,6 +3797,7 @@ return:
 static int32_t nvt_ts_resume(struct device *dev)
 {
 	int ret = 0;
+	int fw_info_ret;
 	if (bTouchIsAwake) {
 		NVT_LOG("Touch is already resume\n");
 		return 0;
@@ -3808,21 +3816,35 @@ static int32_t nvt_ts_resume(struct device *dev)
 	NVT_LOG("start\n");
 
 	ts->ic_state = NVT_IC_RESUME_IN;
-	if (!ts->db_wakeup) {
-		if (ts->ts_pinctrl) {
-			ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_active);
-			if (ret < 0) {
-				NVT_ERR("Failed to select %s pinstate %d\n",
-					PINCTRL_STATE_ACTIVE, ret);
-			}
-		} else {
-			NVT_ERR("Failed to init pinctrl\n");
-		}
+	if (ts->irq_wake_enabled) {
+		ret = disable_irq_wake(ts->client->irq);
+		if (!ret)
+			ts->irq_wake_enabled = false;
+		else
+			NVT_ERR("disable irq wake failed. ret=%d\n", ret);
 	}
+	if (ts->ts_pinctrl) {
+		ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_active);
+		if (ret < 0) {
+			NVT_ERR("Failed to select %s pinstate %d\n",
+				PINCTRL_STATE_ACTIVE, ret);
+		}
+	} else {
+		NVT_ERR("Failed to init pinctrl\n");
+	}
+
+	/* Quiesce the IRQ while the controller is reprobed or reflashed. */
+	nvt_irq_enable(false);
 
 	// please make sure display reset(RESX) sequence and mipi dsi cmds sent before this
 #if NVT_TOUCH_SUPPORT_HW_RST
-	gpio_set_value(ts->reset_gpio, 1);
+	if (gpio_is_valid(ts->reset_gpio)) {
+		gpio_set_value(ts->reset_gpio, 0);
+		mdelay(10);
+		gpio_set_value(ts->reset_gpio, 1);
+		mdelay(50);
+		ts->force_fw_reload = true;
+	}
 #endif
 	if (nvt_get_dbgfw_status()) {
 		if (nvt_update_firmware(DEFAULT_DEBUG_FW_NAME) < 0) {
@@ -3830,16 +3852,26 @@ static int32_t nvt_ts_resume(struct device *dev)
 			nvt_update_firmware(ts->fw_name);
 		}
 	} else {
-		if (nvt_update_firmware(ts->fw_name)) {
-			NVT_ERR("download firmware failed, ignore check fw state\n");
-		} else {
+		/*
+		 * Panel power sequencing does not always reset the Novatek MCU.
+		 * Probe the live firmware first and only reflash when needed.
+		 */
+		msleep(150);
+		fw_info_ret = -1;
+		if (!ts->force_fw_reload)
+			fw_info_ret = nvt_get_fw_info();
+		if (!fw_info_ret) {
+			NVT_LOG("firmware alive after resume, skip redownload\n");
+		} else if (nvt_update_firmware(ts->fw_name)) {
+			NVT_ERR("download firmware failed after fw probe (%d)\n",
+				fw_info_ret);
+		} else if (!ts->force_fw_reload) {
 			nvt_check_fw_reset_state(RESET_STATE_REK);
 		}
+		ts->force_fw_reload = false;
 	}
 
-	if (!ts->db_wakeup) {
-		nvt_irq_enable(true);
-	}
+	nvt_irq_enable(true);
 
 #if NVT_TOUCH_ESD_PROTECT
 	nvt_esd_check_enable(false);
