@@ -1228,9 +1228,11 @@ int switch_pen_input_device(void) {
 
 	msleep(35);
 	mutex_lock(&ts->pen_switch_lock);
-	enable = ((ts->pen_bluetooth_connect) && !(ts->pen_charge_connect) && !(ts->game_mode_enable));
+	enable = ((ts->pen_bluetooth_connect) &&
+		  !(ts->pen_charge_connect) && !(ts->game_mode_enable));
 	NVT_LOG("pen_bluetooth_connect is %d, pen_charge_connect is %d, game_mode_enable %d, %s pen input device\n",
-	ts->pen_bluetooth_connect, ts->pen_charge_connect, ts->game_mode_enable, enable ? "ENABLE" : "DISABLE");
+		ts->pen_bluetooth_connect, ts->pen_charge_connect,
+		ts->game_mode_enable, enable ? "ENABLE" : "DISABLE");
 	//---set xdata index to EVENT BUF ADDR---
 	ret = nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
 	if (ret < 0) {
@@ -1243,7 +1245,7 @@ int switch_pen_input_device(void) {
 	buf[2] = !!enable;
 	ret = CTP_SPI_WRITE(ts->client, buf, 3);
 	if (ret < 0)
-		NVT_ERR("set pen %s failed!\n", enable ? "DISABLE" : "ENABLE");
+		NVT_ERR("set pen %s failed!\n", enable ? "ENABLE" : "DISABLE");
 
 nvt_set_pen_enable_out:
 	mutex_unlock(&ts->pen_switch_lock);
@@ -1429,7 +1431,7 @@ static int32_t nvt_parse_dt(struct device *dev)
 
 static int nvt_get_panel_type(struct nvt_ts_data *ts_data)
 {
-	int i;
+	int i = 0;
 	int j;
 	u8 *lockdown = ts_data->lockdown_info;
 	struct nvt_config_info *panel_list = ts->config_array;
@@ -2302,7 +2304,7 @@ static void nvt_init_touchmode_data(void)
 	xiaomi_touch_interfaces.touch_mode[Touch_Resist_RF][GET_CUR_VALUE] = 0;
 
 	/* Stylus */
-	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MAX_VALUE] = 18;
+	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MAX_VALUE] = 255;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MIN_VALUE] = -1;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_DEF_VALUE] = 0;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][SET_CUR_VALUE] = 0;
@@ -2465,27 +2467,34 @@ static void nvt_set_gesture_mode(void)
 
 static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 {
-	if (nvt_mode >= Touch_Mode_NUM && nvt_mode < 0) {
-		NVT_ERR("%s, nvt mode is error:%d", __func__, nvt_mode);
-		return -EINVAL;
+	if (nvt_mode >= Touch_Mode_NUM || nvt_mode < 0) {
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, nvt_mode);
+		return 0;
 	}
 
 	NVT_LOG("mode:%d, value:%d", nvt_mode, nvt_value);
 	if (nvt_mode == Touch_Doubletap_Mode && ts && nvt_value >= 0) {
-		ts-> db_wakeup = nvt_value ? (ts-> db_wakeup | 0x01) : (ts-> db_wakeup & 0xFE);
+		ts->db_wakeup = nvt_value ?
+			(ts->db_wakeup | 0x01) : (ts->db_wakeup & 0xFE);
 		nvt_set_gesture_mode();
 		return 0;
-	} else if (nvt_mode == Touch_Pen_ENABLE && ts && nvt_value >= 0) {
+	} else if (nvt_mode == Touch_Pen_ENABLE && ts) {
 #if defined(NVT_PEN_CONNECT_STRATEGY)
-		if (!!(nvt_value >> 4))
-			ts->pen_bluetooth_connect = 1;
-		else
-			ts->pen_bluetooth_connect = 0;
+		ts->pen_mode_value = nvt_value;
+		ts->pen_bluetooth_connect =
+			nvt_value >= 0 && !!(nvt_value & 0xF0);
 
 		ts->db_wakeup = ts->db_wakeup & 0xFD; /* close off screen short hand by defalut */
 		dsi_panel_doubleclick_enable(!!ts->db_wakeup);
 		NVT_LOG("nvt_value is 0x%02X, pen status is %s, pen id is %d, pen_bluetooth_connect is %d, db_wakeup is 0x%02X",
-					nvt_value, (nvt_value >> 4) ? "connect":"disconnct", nvt_value & 0x0F, ts->pen_bluetooth_connect, ts->db_wakeup);
+			nvt_value, ts->pen_bluetooth_connect ? "connect" : "disconnect",
+			nvt_value & 0x0F, ts->pen_bluetooth_connect, ts->db_wakeup);
+		xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][SET_CUR_VALUE] =
+			nvt_value;
+		xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_CUR_VALUE] =
+			nvt_value;
 #endif
 
 		switch_pen_input_device();
@@ -2523,12 +2532,14 @@ static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 
 static int nvt_get_mode_value(int mode, int value_type)
 {
-	int value = -1;
+	int value = 0;
 
 	if (mode < Touch_Mode_NUM && mode >= 0)
 		value = xiaomi_touch_interfaces.touch_mode[mode][value_type];
 	else
-		NVT_ERR("%s, don't support\n", __func__);
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, mode);
 
 	return value;
 }
@@ -2541,7 +2552,13 @@ static int nvt_get_mode_all(int mode, int *value)
 		value[2] = xiaomi_touch_interfaces.touch_mode[mode][GET_MIN_VALUE];
 		value[3] = xiaomi_touch_interfaces.touch_mode[mode][GET_MAX_VALUE];
 	} else {
-		NVT_ERR("%s, don't support\n",  __func__);
+		value[0] = 0;
+		value[1] = 0;
+		value[2] = 0;
+		value[3] = 0;
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, mode);
 	}
 	NVT_LOG("%s, mode:%d, value:%d:%d:%d:%d\n", __func__, mode, value[0],
 					value[1], value[2], value[3]);
@@ -3289,6 +3306,7 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 #endif
 
 #if defined(NVT_PEN_CONNECT_STRATEGY)
+	ts->pen_mode_value = -1;
 	ts->pen_bluetooth_connect = 0;
 	ts->pen_charge_connect = false;
 	ts->game_mode_enable = 0;
@@ -3522,8 +3540,10 @@ static int32_t nvt_ts_remove(struct spi_device *client)
 	destroy_workqueue(ts->event_wq);
 	ts->event_wq = NULL;
 
-	if (ts->set_touchfeature_wq)
+	if (ts->set_touchfeature_wq) {
 		destroy_workqueue(ts->set_touchfeature_wq);
+		ts->set_touchfeature_wq = NULL;
+	}
 
 #if NVT_TOUCH_ESD_PROTECT
 	if (nvt_esd_check_wq) {
@@ -3573,11 +3593,6 @@ static int32_t nvt_ts_remove(struct spi_device *client)
 	}
 
 	spi_set_drvdata(client, NULL);
-
-#if CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
-	if (ts->set_touchfeature_wq)
-		destroy_workqueue(ts->set_touchfeature_wq);
-#endif
 
 	if (ts->xbuf) {
 		kfree(ts->xbuf);
@@ -3704,6 +3719,8 @@ static int32_t nvt_ts_suspend(struct device *dev)
 
 	bTouchIsAwake = 0;
 
+	dsi_panel_doubleclick_enable(true);
+
 	if (ts->db_wakeup & 0x01 || ts->db_wakeup & 0x02) {
 		/*---write command to enter "wakeup gesture mode"---*/
 		/*DoubleClick wakeup CMD was sent by display to meet timing*/
@@ -3712,7 +3729,11 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		buf[1] = 0x13;
 		CTP_SPI_WRITE(ts->client, buf, 2);
 
-		enable_irq_wake(ts->client->irq);
+		ret = enable_irq_wake(ts->client->irq);
+		if (!ret)
+			ts->irq_wake_enabled = true;
+		else
+			NVT_ERR("enable irq wake failed. ret=%d\n", ret);
 
 		enable = (ts->db_wakeup & 0x02);
 		memset(buf, 0, sizeof(buf));
@@ -3723,10 +3744,12 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		CTP_SPI_WRITE(ts->client, buf, 3);
 		NVT_LOG("%s pen wakeup gesture\n", enable ? "Enable" : "Disable");
 	} else if (ts->db_wakeup == 0) {
-		/*---write command to enter "deep sleep mode"---*/
-		buf[0] = EVENT_MAP_HOST_CMD;
-		buf[1] = 0x11;
-		CTP_SPI_WRITE(ts->client, buf, 2);
+		NVT_LOG("enter deep sleep while keeping TDDI rails alive\n");
+		if (nvt_write_addr(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD,
+				   0x11) < 0)
+			NVT_ERR("enter touch deep sleep failed\n");
+		else
+			ts->force_fw_reload = true;
 		if (ts->ts_pinctrl) {
 			ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_suspend);
 			if (ret < 0) {
@@ -3790,6 +3813,7 @@ return:
 static int32_t nvt_ts_resume(struct device *dev)
 {
 	int ret = 0;
+	int fw_info_ret;
 	if (bTouchIsAwake) {
 		NVT_LOG("Touch is already resume\n");
 		return 0;
@@ -3808,7 +3832,13 @@ static int32_t nvt_ts_resume(struct device *dev)
 	NVT_LOG("start\n");
 
 	ts->ic_state = NVT_IC_RESUME_IN;
-	if (!ts->db_wakeup) {
+	if (ts->irq_wake_enabled) {
+		ret = disable_irq_wake(ts->client->irq);
+		if (!ret)
+			ts->irq_wake_enabled = false;
+		else
+			NVT_ERR("disable irq wake failed. ret=%d\n", ret);
+	}
 		if (ts->ts_pinctrl) {
 			ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_active);
 			if (ret < 0) {
@@ -3818,11 +3848,18 @@ static int32_t nvt_ts_resume(struct device *dev)
 		} else {
 			NVT_ERR("Failed to init pinctrl\n");
 		}
-	}
+	/* Quiesce the IRQ while the controller is reprobed or reflashed. */
+	nvt_irq_enable(false);
 
 	// please make sure display reset(RESX) sequence and mipi dsi cmds sent before this
 #if NVT_TOUCH_SUPPORT_HW_RST
+	if (gpio_is_valid(ts->reset_gpio)) {
+		gpio_set_value(ts->reset_gpio, 0);
+		mdelay(10);
 	gpio_set_value(ts->reset_gpio, 1);
+		mdelay(50);
+		ts->force_fw_reload = true;
+	}
 #endif
 	if (nvt_get_dbgfw_status()) {
 		if (nvt_update_firmware(DEFAULT_DEBUG_FW_NAME) < 0) {
@@ -3830,16 +3867,29 @@ static int32_t nvt_ts_resume(struct device *dev)
 			nvt_update_firmware(ts->fw_name);
 		}
 	} else {
-		if (nvt_update_firmware(ts->fw_name)) {
-			NVT_ERR("download firmware failed, ignore check fw state\n");
-		} else {
+		/*
+		 * Panel power sequencing does not always reset the Novatek MCU.
+		 * Conversely, a blind firmware redownload can leave it stuck in the
+		 * bootloader when the controller was still running. Probe the live
+		 * firmware first and only reflash when it is actually unavailable.
+		 */
+		/* Wait for the panel and its shared VCI rail to settle. */
+		msleep(150);
+		fw_info_ret = -1;
+		if (!ts->force_fw_reload)
+			fw_info_ret = nvt_get_fw_info();
+		if (!fw_info_ret) {
+			NVT_LOG("firmware alive after resume, skip redownload\n");
+		} else if (nvt_update_firmware(ts->fw_name)) {
+			NVT_ERR("download firmware failed after fw probe (%d)\n",
+				fw_info_ret);
+		} else if (!ts->force_fw_reload) {
 			nvt_check_fw_reset_state(RESET_STATE_REK);
 		}
+		ts->force_fw_reload = false;
 	}
 
-	if (!ts->db_wakeup) {
 		nvt_irq_enable(true);
-	}
 
 #if NVT_TOUCH_ESD_PROTECT
 	nvt_esd_check_enable(false);
