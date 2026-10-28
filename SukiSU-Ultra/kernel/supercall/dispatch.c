@@ -1,5 +1,8 @@
 #include <linux/capability.h>
 #include <linux/cred.h>
+#include <linux/kallsyms.h>
+#include <linux/mm.h>
+#include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
@@ -15,6 +18,7 @@
 #include "runtime/ksud_boot.h"
 #include "feature/kernel_umount.h"
 #include "manager/manager_identity.h"
+#include "extension/dynamic_manager.h"
 #include "selinux/selinux.h"
 #include "infra/file_wrapper.h"
 #include "hook/tp_marker.h"
@@ -22,12 +26,12 @@
 #include "sulog/event.h"
 #include "sulog/fd.h"
 #include "supercall/supercall.h"
+#include "infra/symbol_resolver.h"
+#include "preinit/preinit.h"
 #include "feature/uts_spoof.h"
-#include "feature/cpu_spoof.h"
-
-#ifdef CONFIG_KPM
-#include "kpm/kpm.h"
-#endif
+#include "extension/extension.h"
+#include "extension/umount_paths.h"
+#include "extension/version_spoof.h"
 
 static int do_grant_root(void __user *arg)
 {
@@ -50,6 +54,9 @@ static int do_get_info(void __user *arg)
 
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
+    if (ksu_bundled) {
+        cmd.flags |= KSU_GET_INFO_FLAG_BUNDLED;
+    }
 #endif
 
     if (is_manager()) {
@@ -58,11 +65,16 @@ static int do_get_info(void __user *arg)
     if (ksu_late_loaded) {
         cmd.flags |= KSU_GET_INFO_FLAG_LATE_LOAD;
     }
-#ifdef EXPECTED_SIZE2
+    // A late load never sees PID 1's selinux_setup, so preinit cannot run.
+    if (ksu_preinit_enabled_param() && !ksu_late_loaded) {
+        cmd.flags |= KSU_GET_INFO_FLAG_PREINIT;
+    }
+#if KSU_IS_PR_BUILD
     cmd.flags |= KSU_GET_INFO_FLAG_PR_BUILD;
 #endif
     cmd.features = KSU_FEATURE_MAX;
     cmd.uapi_version = KERNEL_SU_UAPI_VERSION;
+    ksu_version_spoof_apply_info(&cmd);
 
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         pr_err("get_version: copy_to_user failed\n");
@@ -78,6 +90,9 @@ static int do_get_info_legacy(void __user *arg)
 
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
+    if (ksu_bundled) {
+        cmd.flags |= KSU_GET_INFO_FLAG_BUNDLED;
+    }
 #endif
 
     if (is_manager()) {
@@ -86,10 +101,12 @@ static int do_get_info_legacy(void __user *arg)
     if (ksu_late_loaded) {
         cmd.flags |= KSU_GET_INFO_FLAG_LATE_LOAD;
     }
-#ifdef EXPECTED_SIZE2
+#if KSU_IS_PR_BUILD
     cmd.flags |= KSU_GET_INFO_FLAG_PR_BUILD;
 #endif
     cmd.features = KSU_FEATURE_MAX;
+
+    ksu_version_spoof_apply_info_legacy(&cmd);
 
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         pr_err("get_version: copy_to_user failed\n");
@@ -101,6 +118,7 @@ static int do_get_info_legacy(void __user *arg)
 
 static int do_report_event(void __user *arg)
 {
+    static bool services_started = false;
     struct ksu_report_event_cmd cmd;
 
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
@@ -110,6 +128,9 @@ static int do_report_event(void __user *arg)
     switch (cmd.event) {
     case EVENT_POST_FS_DATA: {
         static bool post_fs_data_lock = false;
+
+        // Reset for emulated soft reboot
+        services_started = false;
         if (!post_fs_data_lock) {
             post_fs_data_lock = true;
             if (ksu_late_loaded) {
@@ -138,6 +159,15 @@ static int do_report_event(void __user *arg)
         pr_info("module mounted!\n");
         on_module_mounted();
         break;
+    }
+    case EVENT_SERVICES: {
+        if (services_started) {
+            pr_info("services already started, skipping\n");
+            return 0;
+        }
+        services_started = true;
+        pr_info("services triggered\n");
+        return 1;
     }
     default:
         break;
@@ -285,7 +315,7 @@ static int do_uid_granted_root(void __user *arg)
         return -EFAULT;
     }
 
-    cmd.granted = ksu_is_allow_uid_for_current(cmd.uid);
+    cmd.granted = ksu_is_uid_granted_root(cmd.uid);
 
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         pr_err("uid_granted_root: copy_to_user failed\n");
@@ -383,7 +413,7 @@ static int do_set_app_profile(void __user *arg)
 static int do_get_feature(void __user *arg)
 {
     struct ksu_get_feature_cmd cmd;
-    bool supported;
+    bool supported = false;
     int ret;
 
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
@@ -392,7 +422,13 @@ static int do_get_feature(void __user *arg)
     }
 
     ret = ksu_get_feature(cmd.feature_id, &cmd.value, &supported);
-    cmd.supported = supported ? 1 : 0;
+    cmd.supported = 0;
+    if (supported) {
+        cmd.supported |= KSU_FEATURE_FLAG_SUPPORTED;
+        if (ksu_feature_is_forced(cmd.feature_id)) {
+            cmd.supported |= KSU_FEATURE_FLAG_FORCED;
+        }
+    }
 
     if (ret && supported) {
         pr_err("get_feature: failed for feature %u: %d\n", cmd.feature_id, ret);
@@ -534,110 +570,11 @@ static int do_nuke_ext4_sysfs(void __user *arg)
     return nuke_ext4_sysfs(mnt);
 }
 
-struct list_head mount_list = LIST_HEAD_INIT(mount_list);
-DECLARE_RWSEM(mount_list_lock);
-
-static int add_try_umount(void __user *arg)
-{
-    struct mount_entry *new_entry, *entry, *tmp;
-    struct ksu_add_try_umount_cmd cmd;
-    char buf[256] = { 0 };
-
-    if (copy_from_user(&cmd, arg, sizeof cmd))
-        return -EFAULT;
-
-    switch (cmd.mode) {
-    case KSU_UMOUNT_WIPE: {
-        struct mount_entry *entry, *tmp;
-        down_write(&mount_list_lock);
-        list_for_each_entry_safe (entry, tmp, &mount_list, list) {
-            pr_info("wipe_umount_list: removing entry: %s\n", entry->umountable);
-            list_del(&entry->list);
-            kfree(entry->umountable);
-            kfree(entry);
-        }
-        up_write(&mount_list_lock);
-
-        return 0;
-    }
-
-    case KSU_UMOUNT_ADD: {
-        long len = strncpy_from_user(buf, (const char __user *)cmd.arg, 256);
-        if (len <= 0)
-            return -EFAULT;
-
-        buf[sizeof(buf) - 1] = '\0';
-
-        new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
-        if (!new_entry)
-            return -ENOMEM;
-
-        new_entry->umountable = kstrdup(buf, GFP_KERNEL);
-        if (!new_entry->umountable) {
-            kfree(new_entry);
-            return -ENOMEM;
-        }
-
-        down_write(&mount_list_lock);
-
-        // disallow dupes
-        // if this gets too many, we can consider moving this whole task to a kthread
-        list_for_each_entry (entry, &mount_list, list) {
-            if (!strcmp(entry->umountable, buf)) {
-                pr_info("cmd_add_try_umount: %s is already here!\n", buf);
-                up_write(&mount_list_lock);
-                kfree(new_entry->umountable);
-                kfree(new_entry);
-                return -EEXIST;
-            }
-        }
-
-        // now check flags and add
-        // this also serves as a null check
-        if (cmd.flags)
-            new_entry->flags = cmd.flags;
-        else
-            new_entry->flags = 0;
-
-        // debug
-        list_add(&new_entry->list, &mount_list);
-        up_write(&mount_list_lock);
-        pr_info("cmd_add_try_umount: %s added!\n", buf);
-
-        return 0;
-    }
-
-    // this is just strcmp'd wipe anyway
-    case KSU_UMOUNT_DEL: {
-        long len = strncpy_from_user(buf, (const char __user *)cmd.arg, sizeof(buf) - 1);
-        if (len <= 0)
-            return -EFAULT;
-
-        buf[sizeof(buf) - 1] = '\0';
-
-        down_write(&mount_list_lock);
-        list_for_each_entry_safe (entry, tmp, &mount_list, list) {
-            if (!strcmp(entry->umountable, buf)) {
-                pr_info("cmd_add_try_umount: entry removed: %s\n", entry->umountable);
-                list_del(&entry->list);
-                kfree(entry->umountable);
-                kfree(entry);
-            }
-        }
-        up_write(&mount_list_lock);
-
-        return 0;
-    }
-
-    default: {
-        pr_err("cmd_add_try_umount: invalid operation %u\n", cmd.mode);
-        return -EINVAL;
-    }
-
-    } // switch(cmd.mode)
-
-    return 0;
-}
+/*
+ * mount_list / mount_list_lock were relocated to kernel/extension/umount_paths.h
+ * (and are defined in kernel/extension/umount_paths.c). See that header for the
+ * canonical definitions.
+ */
 
 static int do_set_init_pgrp(void __user *arg)
 {
@@ -695,13 +632,95 @@ static int do_disable_escape_to_root(void __user *arg)
     return 0;
 }
 
+/*
+ * Resolve symbols of the running kernel image, exported or not, matching
+ * them like ksuinit's /proc/kallsyms walk. Userspace uses this to bind a
+ * module's undefined symbols before init_module, so the kernel never parses
+ * the module ELF itself.
+ */
+static int do_lookup_symbols(void __user *arg)
+{
+    struct ksu_lookup_symbols_cmd cmd;
+    const u64 __user *unames;
+    u64 __user *uaddrs;
+    char **names;
+    unsigned long *addrs;
+    int ret = 0;
+    u32 i;
+
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+
+    if (cmd.flags) {
+        pr_err("lookup_symbols: unsupported flags 0x%x\n", cmd.flags);
+        return -EINVAL;
+    }
+    if (!cmd.count || cmd.count > KSU_LOOKUP_SYMBOLS_MAX)
+        return -EINVAL;
+
+    names = kvcalloc(cmd.count, sizeof(*names), GFP_KERNEL);
+    addrs = kvcalloc(cmd.count, sizeof(*addrs), GFP_KERNEL);
+    if (!names || !addrs) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    unames = (const u64 __user *)(uintptr_t)cmd.names;
+    uaddrs = (u64 __user *)(uintptr_t)cmd.addrs;
+    for (i = 0; i < cmd.count; i++) {
+        u64 uname;
+        char *name;
+
+        if (get_user(uname, unames + i)) {
+            ret = -EFAULT;
+            goto out;
+        }
+        name = strndup_user((const char __user *)(uintptr_t)uname, KSYM_NAME_LEN);
+        if (IS_ERR(name)) {
+            // An overlong name cannot be a kernel symbol: report it missing.
+            if (PTR_ERR(name) == -EINVAL)
+                continue;
+            ret = PTR_ERR(name);
+            goto out;
+        }
+        if (!*name) {
+            kfree(name);
+            continue;
+        }
+        names[i] = name;
+    }
+
+    ret = ksu_lookup_kernel_symbols((const char *const *)names, addrs, cmd.count);
+    if (ret < 0)
+        goto out;
+
+    for (i = 0; i < cmd.count; i++) {
+        if (put_user((u64)addrs[i], uaddrs + i)) {
+            ret = -EFAULT;
+            goto out;
+        }
+    }
+
+out:
+    if (names) {
+        for (i = 0; i < cmd.count; i++)
+            kfree(names[i]);
+    }
+    kvfree(names);
+    kvfree(addrs);
+    return ret;
+}
+
+// do_set_spoof_cpu was relocated to kernel/extension/cpu_spoof.c.
+// do_set_spoof_version stays here because the KSU_IOCTL_SET_SPOOF_VERSION
+// number is kept (see uapi/supercall.h).
+
 static int do_set_spoof_version(void __user *arg)
 {
     struct ksu_set_spoof_version_cmd cmd;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
-    }
 
     cmd.release[sizeof(cmd.release) - 1] = '\0';
     cmd.version[sizeof(cmd.version) - 1] = '\0';
@@ -710,121 +729,13 @@ static int do_set_spoof_version(void __user *arg)
                                  cmd.version[0] != '\0' ? cmd.version : NULL);
 }
 
-static int do_set_spoof_cpu(void __user *arg)
-{
-    struct ksu_set_spoof_cpu_cmd cmd;
-
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
-        return -EFAULT;
-    }
-
-    return ksu_set_spoof_cpu(&cmd);
-}
-
-static int list_try_umount(void __user *arg)
-{
-    struct ksu_list_try_umount_cmd cmd;
-    struct mount_entry *entry;
-    char *output_buf;
-    size_t output_size;
-    size_t offset = 0;
-    int ret = 0;
-    bool using_vmalloc = false;
-    int mount_count = 0;
-    
-    #define MAX_UMOUNT_LIST_SIZE (2 * 1024 * 1024)  // 2MB absolute max
-    #define DEFAULT_UMOUNT_SIZE (64 * 1024)         // 64KB default
-
-    if (copy_from_user(&cmd, arg, sizeof(cmd)))
-        return -EFAULT;
-
-    if (cmd.buf_size > 1024 * 1024) {
-        pr_err("list_try_umount: invalid buf_size %u\n", cmd.buf_size);
-        return -EINVAL;
-    }
-
-    output_size = cmd.buf_size ? cmd.buf_size : 4096;
-
-    if (!cmd.arg || output_size == 0)
-        return -EINVAL;
-
-    // Count mounts first to estimate size needed
-    down_read(&mount_list_lock);
-    list_for_each_entry(entry, &mount_list, list) {
-        mount_count++;
-    }
-    up_read(&mount_list_lock);
-
-    // Calculate needed size: ~200 bytes per mount + 1KB header
-    output_size = 1024 + (mount_count * 200);
-    
-    // Use at least default size, cap at maximum
-    if (output_size < DEFAULT_UMOUNT_SIZE)
-        output_size = DEFAULT_UMOUNT_SIZE;
-    if (output_size > MAX_UMOUNT_LIST_SIZE)
-        output_size = MAX_UMOUNT_LIST_SIZE;
-
-    pr_info("KernelSU: Allocating %zu bytes for %d mounts (user requested %zu)\n",
-            output_size, mount_count, (size_t)cmd.buf_size);
-
-    // Try kzalloc first with NOWARN flag
-    output_buf = kzalloc(output_size, GFP_KERNEL | __GFP_NOWARN);
-    if (!output_buf) {
-        // Fallback to vzalloc for large allocations
-        pr_info("KernelSU: kzalloc failed for %zu bytes, using vzalloc\n", 
-                output_size);
-        output_buf = vzalloc(output_size);
-        using_vmalloc = true;
-    }
-
-    if (!output_buf) {
-        pr_err("KernelSU: Failed to allocate %zu bytes for umount list\n",
-               output_size);
-        return -ENOMEM;
-    }
-    offset += snprintf(output_buf + offset, output_size - offset,
-               "Mount Point\tFlags\n");
-    offset += snprintf(output_buf + offset, output_size - offset,
-               "----------\t-----\n");
-
-    down_read(&mount_list_lock);
-    list_for_each_entry (entry, &mount_list, list) {
-        int written =
-            snprintf(output_buf + offset, output_size - offset,
-                 "%s\t%u\n", entry->umountable, entry->flags);
-        if (written < 0) {
-            ret = -EFAULT;
-            break;
-        }
-        if (written >= (int)(output_size - offset)) {
-            // Should rarely happen since we calculated size
-            pr_warn("KernelSU: Buffer full, truncating mount list\n");
-            ret = -ENOSPC;
-            break;
-        }
-        offset += written;
-    }
-    up_read(&mount_list_lock);
-
-    if (ret == 0) {
-        if (copy_to_user((void __user *)cmd.arg, output_buf, offset))
-            ret = -EFAULT;
-    }
-
-    // Free using the correct method
-    if (using_vmalloc)
-        vfree(output_buf);
-    else
-        kfree(output_buf);
-    return ret;
-}
-
 // 100. GET_FULL_VERSION - Get full version string
 static int do_get_full_version(void __user *arg)
 {
     struct ksu_get_full_version_cmd cmd = { 0 };
 
     strscpy(cmd.version_full, KSU_VERSION_FULL, sizeof(cmd.version_full));
+    ksu_version_spoof_apply_full_version(cmd.version_full, sizeof(cmd.version_full));
 
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         pr_err("get_full_version: copy_to_user failed\n");
@@ -850,19 +761,147 @@ static int do_get_hook_type(void __user *arg)
     return 0;
 }
 
-// 102. ENABLE_KPM - Check if KPM is enabled
-static int do_enable_kpm(void __user *arg)
+/* Capability bits for a reply: handler caps plus the bits the dispatcher
+ * owns. FORCED is global state, not a handler property. */
+static u32 extension_reply_caps(u32 extension_id, u32 caps)
 {
-    struct ksu_enable_kpm_cmd cmd;
+    if (ksu_extension_is_forced(extension_id))
+        caps |= KSU_EXTENSION_FLAG_FORCED;
+    return caps;
+}
 
-    cmd.enabled = IS_ENABLED(CONFIG_KPM);
+/*
+ * Single entry point for the six extension ops. Userspace fills
+ * struct ksu_extension_cmd with an extension_id and one of:
+ *   ABI  -> answers the extension ABI probe. The id must be
+ *           KSU_EXTENSION_ABI_PROBE_ID, which no handler owns, so an old
+ *           kernel rejects the call with -EINVAL: that rejection is how
+ *           userspace tells "no capability bits available" apart from
+ *           "capability bits are all zero".
+ *   ENUM -> fills struct ksu_extension_desc at cmd.user_ptr for the
+ *           handler at index cmd.value. The id must also be
+ *           KSU_EXTENSION_ABI_PROBE_ID so pre-ABI-2 kernels reject it
+ *           instead of reading cmd.value as a sticky write. Returns
+ *           -ENOENT past the last registered handler.
+ *   GET  -> returns supported/value/capability bits. value=0 and
+ *           supported=true for io-only handlers (handler presence is the
+ *           signal).
+ *   SET  -> value-flavoured: forwards to ops->set.
+ *           io-flavoured:    -EOPNOTSUPP (no sticky bit).
+ *           While a force_extension=<id> is in effect, all SETs
+ *           return -EPERM until reboot. On success, the post-set
+ *           state (capability bits / forced flag / current value) is
+ *           written back to *arg so userspace can confirm the write
+ *           without an extra GET round-trip.
+ *   IO   -> forwards cmd.user_ptr to the registered io_handler.
+ *   WIPE -> handler->wipe (kernel-side). Today only umount_paths
+ *           registers one; other handlers return -EOPNOTSUPP. Wipe
+ *           does not go through io_handler.
+ *
+ * Every successful reply overwrites cmd.api_version with the kernel's
+ * extension ABI, so callers learn the negotiated version from the same
+ * round-trip that carries the data.
+ */
+static int do_extension(void __user *arg)
+{
+    struct ksu_extension_cmd cmd;
+    u32 extension_id;
+    int ret;
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
-        pr_err("enable_kpm: copy_to_user failed\n");
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
+
+    if (cmd.op == KSU_EXTENSION_ABI) {
+        if (cmd.id != KSU_EXTENSION_ABI_PROBE_ID)
+            return -EINVAL;
+        cmd.value = 0;
+        cmd.supported = 0;
+        cmd.api_version = KSU_EXTENSION_API_VERSION;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
     }
 
-    return 0;
+    if (cmd.op == KSU_EXTENSION_ENUM) {
+        struct ksu_extension_desc desc;
+
+        if (cmd.id != KSU_EXTENSION_ABI_PROBE_ID)
+            return -EINVAL;
+        if (!cmd.user_ptr || cmd.value >> 32)
+            return -EINVAL;
+
+        ret = ksu_extension_enumerate((u32)cmd.value, &desc);
+        if (ret)
+            return ret;
+        if (copy_to_user((void __user *)(uintptr_t)cmd.user_ptr, &desc,
+                         sizeof(desc)))
+            return -EFAULT;
+
+        cmd.id = desc.id;
+        cmd.supported = desc.caps;
+        cmd.value = 0;
+        cmd.api_version = KSU_EXTENSION_API_VERSION;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
+
+    extension_id = cmd.id;
+    if (extension_id >= KSU_EXTENSION_MAX)
+        return -EINVAL;
+
+    /* op == IO  -> forward the user pointer verbatim */
+    if (cmd.op == KSU_EXTENSION_IO)
+        return ksu_extension_ioctl(extension_id, cmd.api_version,
+                                   (void __user *)(uintptr_t)cmd.user_ptr);
+
+    /* op == WIPE -> call the extension's wipe handler if any */
+    if (cmd.op == KSU_EXTENSION_WIPE)
+        return ksu_extension_wipe(extension_id, cmd.api_version);
+
+    if (cmd.op == KSU_EXTENSION_SET) {
+        ret = ksu_extension_set(extension_id, cmd.api_version, cmd.value);
+        if (ret)
+            return ret;
+        /*
+         * Round-trip the post-set state to userspace. The cmd.supported
+         * field is documented as out, and a manager that just wrote
+         * `value=1` wants to see "supported, FORCED if applicable"
+         * come back rather than zeroed bytes. Failure to copy_to_user
+         * is non-fatal here (the write itself succeeded) but reported
+         * as -EFAULT so the caller can retry.
+         */
+        {
+            u64 value = 0;
+            u32 caps = 0;
+
+            (void)ksu_extension_get(extension_id, KSU_EXTENSION_API_VERSION,
+                                    &value, &caps);
+            cmd.supported = extension_reply_caps(extension_id, caps);
+            cmd.value = value;
+            cmd.api_version = KSU_EXTENSION_API_VERSION;
+            if (copy_to_user(arg, &cmd, sizeof(cmd)))
+                return -EFAULT;
+        }
+        return 0;
+    }
+
+    {
+        u64 value = 0;
+        u32 caps = 0;
+
+        ret = ksu_extension_get(extension_id, cmd.api_version, &value, &caps);
+        if (ret)
+            return ret;
+        if (!(caps & KSU_FEATURE_FLAG_SUPPORTED))
+            return -EOPNOTSUPP;
+        cmd.value = value;
+        cmd.supported = extension_reply_caps(extension_id, caps);
+        cmd.api_version = KSU_EXTENSION_API_VERSION;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
 }
 
 // IOCTL handlers mapping table
@@ -974,7 +1013,8 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .cmd = KSU_IOCTL_GET_WRAPPER_FD,
         .name = "GET_WRAPPER_FD",
         .handler = do_get_wrapper_fd,
-        .perm_check = manager_or_root
+        .perm_check = manager_or_root,
+        .allow_su_session = true
     },
     {
         .cmd = KSU_IOCTL_MANAGE_MARK,
@@ -1006,11 +1046,18 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .handler = do_get_sulog_fd,
         .perm_check = only_root
     },
-    { 
-        .cmd = KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT, 
-        .name = "DISABLE_ESCAPE_TO_ROOT", 
-        .handler = do_disable_escape_to_root, 
-        .perm_check = only_root 
+    {
+        .cmd = KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT,
+        .name = "DISABLE_ESCAPE_TO_ROOT",
+        .handler = do_disable_escape_to_root,
+        .perm_check = only_root,
+        .allow_su_session = true
+    },
+    {
+        .cmd = KSU_IOCTL_LOOKUP_SYMBOLS,
+        .name = "LOOKUP_SYMBOLS",
+        .handler = do_lookup_symbols,
+        .perm_check = only_root
     },
     {
         .cmd = KSU_IOCTL_SET_SPOOF_VERSION,
@@ -1019,41 +1066,21 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .perm_check = only_root
     },
     {
-        .cmd = KSU_IOCTL_SET_SPOOF_CPU,
-        .name = "SET_SPOOF_CPU",
-        .handler = do_set_spoof_cpu,
-        .perm_check = only_root
-    },
-    { 
         .cmd = KSU_IOCTL_GET_FULL_VERSION,
         .name = "GET_FULL_VERSION",
         .handler = do_get_full_version,
         .perm_check = always_allow
     },
-    { 
+    {
         .cmd = KSU_IOCTL_HOOK_TYPE,
         .name = "GET_HOOK_TYPE",
         .handler = do_get_hook_type,
         .perm_check = manager_or_root
     },
-    { 
-        .cmd = KSU_IOCTL_ENABLE_KPM,
-        .name = "GET_ENABLE_KPM",
-        .handler = do_enable_kpm,
-        .perm_check = manager_or_root
-    },
-#ifdef CONFIG_KPM
-    { 
-        .cmd = KSU_IOCTL_KPM,
-        .name = "KPM_OPERATION",
-        .handler = do_kpm,
-        .perm_check = manager_or_root
-    },
-#endif
-    { 
-        .cmd = KSU_IOCTL_LIST_TRY_UMOUNT,
-        .name = "LIST_TRY_UMOUNT",
-        .handler = list_try_umount,
+    {
+        .cmd = KSU_IOCTL_EXTENSION,
+        .name = "EXTENSION",
+        .handler = do_extension,
         .perm_check = manager_or_root
     },
     {
@@ -1065,7 +1092,7 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
 };
 // clang-format on
 
-long ksu_supercall_handle_ioctl(unsigned int cmd, void __user *argp)
+long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void __user *argp)
 {
     int i;
 
@@ -1076,7 +1103,8 @@ long ksu_supercall_handle_ioctl(unsigned int cmd, void __user *argp)
     for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
         if (cmd == ksu_ioctl_handlers[i].cmd) {
             // Check permission first
-            if (ksu_ioctl_handlers[i].perm_check && !ksu_ioctl_handlers[i].perm_check()) {
+            if (ksu_ioctl_handlers[i].perm_check && !ksu_ioctl_handlers[i].perm_check() &&
+                !(ksu_ioctl_handlers[i].allow_su_session && ksu_is_su_session_fd(filp))) {
                 pr_warn("ksu ioctl: permission denied for cmd=0x%x uid=%d\n", cmd, current_uid().val);
                 return -EPERM;
             }
@@ -1101,13 +1129,9 @@ void __init ksu_supercall_dump_commands(void)
 
 void ksu_supercall_cleanup_state(void)
 {
-    struct mount_entry *entry, *tmp;
-
-    down_write(&mount_list_lock);
-    list_for_each_entry_safe (entry, tmp, &mount_list, list) {
-        list_del(&entry->list);
-        kfree(entry->umountable);
-        kfree(entry);
-    }
-    up_write(&mount_list_lock);
+    /*
+     * mount_list / mount_list_lock are owned by kernel/extension/umount_paths.c.
+     * The umount_paths extension is responsible for wiping its own state; see
+     * ksu_extension_exit() and the WIPE branch of ksu_extension_umount_paths_io.
+     */
 }

@@ -13,225 +13,38 @@
 #endif
 #include <linux/uaccess.h>
 #include <linux/version.h>
-#ifdef CONFIG_KSU_SUSFS
-#include <linux/namei.h>
-#include <linux/susfs.h>
-#endif
 
 #include "uapi/supercall.h"
-#include "kpm/kpm.h"
+#include "extension/extension.h"
 #include "supercall/internal.h"
 #include "arch.h"
 #include "util.h"
 #include "klog.h" // IWYU pragma: keep
+#ifdef CONFIG_KSU_SUSFS
+#include "susfs_compat.h"
+#endif
+
+#define KSU_DRIVER_PERMISSION_SU_SESSION (1UL << 0)
+
+struct ksu_driver_context {
+    unsigned long permissions;
+};
 
 struct ksu_install_fd_tw {
     struct callback_head cb;
     int __user *outp;
 };
 
-#ifdef CONFIG_KSU_SUSFS
-#define SukiSUSFS_MAGIC 0xFAFAFAFA
-#define SukiCMD_ADD_PATH 0x55550
-#define SukiCMD_ADD_PATH_LOOP 0x55553
-#define SukiCMD_HIDE_MOUNTS 0x55561
-#define SukiCMD_ADD_KSTAT 0x55570
-#define SukiCMD_UPDATE_KSTAT 0x55571
-#define SukiCMD_ADD_KSTAT_STATIC 0x55572
-#define SukiCMD_SET_UNAME 0x55590
-#define SukiCMD_ENABLE_LOG 0x555A0
-#define SukiCMD_SET_CMDLINE 0x555B0
-#define SukiCMD_OPEN_REDIRECT 0x555C0
-#define SukiCMD_SHOW_VERSION 0x555E1
-#define SukiCMD_SHOW_FEATURES 0x555E2
-#define SukiCMD_SHOW_VARIANT 0x555E3
-#define SukiCMD_AVC_SPOOF 0x60010
-#define SukiCMD_ADD_MAP 0x60020
-
-struct suki_susfs_path { char path[256]; int err; };
-struct suki_susfs_open_redirect {
-    char target_pathname[256];
-    char redirected_pathname[256];
-    u32 uid_scheme;
-    int err;
-};
-struct suki_susfs_kstat {
-    u32 is_statically;
-    u64 target_ino;
-    char target_pathname[256];
-    u64 spoofed_ino;
-    u64 spoofed_dev;
-    u32 spoofed_nlink;
-    u64 spoofed_size;
-    s64 spoofed_atime_tv_sec;
-    u64 spoofed_atime_tv_nsec;
-    s64 spoofed_mtime_tv_sec;
-    u64 spoofed_mtime_tv_nsec;
-    s64 spoofed_ctime_tv_sec;
-    u64 spoofed_ctime_tv_nsec;
-    u64 spoofed_blocks;
-    s64 spoofed_blksize;
-    u32 flags;
-    int err;
-};
-
-static void susfs_call_v2(void (*fn)(void __user **), void __user *arg)
-{
-    void __user *ptr = arg;
-
-    fn(&ptr);
-}
-
-static void susfs_call_v2_local(void (*fn)(void __user **), void *arg)
-{
-    mm_segment_t old_fs = get_fs();
-    void __user *ptr = (void __user *)arg;
-
-    set_fs(KERNEL_DS);
-    fn(&ptr);
-    set_fs(old_fs);
-}
-
-static int susfs_add_path_compat(void __user *arg, bool loop)
-{
-    struct suki_susfs_path in;
-    struct st_susfs_sus_path old = { 0 };
-    struct path path;
-
-    if (copy_from_user(&in, arg, sizeof(in)))
-        return -EFAULT;
-    in.path[sizeof(in.path) - 1] = '\0';
-    strlcpy(old.target_pathname, in.path, sizeof(old.target_pathname));
-    in.err = kern_path(old.target_pathname, LOOKUP_FOLLOW, &path);
-    if (in.err)
-        return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-    old.target_ino = d_inode(path.dentry)->i_ino;
-    old.i_uid = current_uid().val;
-    path_put(&path);
-
-    susfs_call_v2_local(loop ? susfs_add_sus_path_loop :
-                               susfs_add_sus_path, &old);
-    in.err = old.err;
-    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-}
-
-static int susfs_kstat_compat(void __user *arg, bool update)
-{
-    struct suki_susfs_kstat in;
-    struct st_susfs_sus_kstat old = { 0 };
-
-    if (copy_from_user(&in, arg, sizeof(in)))
-        return -EFAULT;
-    old.is_statically = in.is_statically;
-    old.target_ino = (unsigned long)in.target_ino;
-    strlcpy(old.target_pathname, in.target_pathname,
-            sizeof(old.target_pathname));
-    old.spoofed_ino = (unsigned long)in.spoofed_ino;
-    old.spoofed_dev = (unsigned long)in.spoofed_dev;
-    old.spoofed_nlink = in.spoofed_nlink;
-    old.spoofed_size = in.spoofed_size;
-    old.spoofed_atime_tv_sec = (long)in.spoofed_atime_tv_sec;
-    old.spoofed_atime_tv_nsec = (long)in.spoofed_atime_tv_nsec;
-    old.spoofed_mtime_tv_sec = (long)in.spoofed_mtime_tv_sec;
-    old.spoofed_mtime_tv_nsec = (long)in.spoofed_mtime_tv_nsec;
-    old.spoofed_ctime_tv_sec = (long)in.spoofed_ctime_tv_sec;
-    old.spoofed_ctime_tv_nsec = (long)in.spoofed_ctime_tv_nsec;
-    old.spoofed_blocks = in.spoofed_blocks;
-    old.spoofed_blksize = (unsigned long)in.spoofed_blksize;
-    susfs_call_v2_local(update ? susfs_update_sus_kstat :
-                                susfs_add_sus_kstat, &old);
-    in.err = old.err;
-    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-}
-
-static int susfs_open_redirect_compat(void __user *arg)
-{
-    struct suki_susfs_open_redirect in;
-    struct st_susfs_open_redirect old = { 0 };
-    struct path path;
-
-    if (copy_from_user(&in, arg, sizeof(in)))
-        return -EFAULT;
-    in.target_pathname[sizeof(in.target_pathname) - 1] = '\0';
-    in.redirected_pathname[sizeof(in.redirected_pathname) - 1] = '\0';
-    in.err = kern_path(in.target_pathname, LOOKUP_FOLLOW, &path);
-    if (in.err)
-        return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-    old.target_ino = d_inode(path.dentry)->i_ino;
-    path_put(&path);
-    strlcpy(old.target_pathname, in.target_pathname,
-            sizeof(old.target_pathname));
-    strlcpy(old.redirected_pathname, in.redirected_pathname,
-            sizeof(old.redirected_pathname));
-    susfs_call_v2_local(susfs_add_open_redirect, &old);
-    in.err = old.err;
-    return copy_to_user(arg, &in, sizeof(in)) ? -EFAULT : 0;
-}
-
-static void susfs_handle_reboot(unsigned int cmd, void __user *arg)
-{
-    if (current_uid().val != 0 || !arg)
-        return;
-
-    switch (cmd) {
-    case SukiCMD_ADD_PATH:
-        susfs_add_path_compat(arg, false);
-        break;
-    case SukiCMD_ADD_PATH_LOOP:
-        susfs_add_path_compat(arg, true);
-        break;
-    case SukiCMD_HIDE_MOUNTS:
-        susfs_call_v2(susfs_set_hide_sus_mnts_for_all_procs, arg);
-        break;
-    case SukiCMD_ADD_KSTAT:
-    case SukiCMD_ADD_KSTAT_STATIC:
-        susfs_kstat_compat(arg, false);
-        break;
-    case SukiCMD_UPDATE_KSTAT:
-        susfs_kstat_compat(arg, true);
-        break;
-    case SukiCMD_SET_UNAME:
-        susfs_call_v2(susfs_set_uname, arg);
-        break;
-    case SukiCMD_ENABLE_LOG:
-        susfs_call_v2(susfs_enable_log, arg);
-        break;
-    case SukiCMD_SET_CMDLINE:
-        susfs_call_v2(susfs_set_cmdline_or_bootconfig, arg);
-        break;
-    case SukiCMD_OPEN_REDIRECT:
-        susfs_open_redirect_compat(arg);
-        break;
-    case SukiCMD_SHOW_VERSION:
-        susfs_call_v2(susfs_show_version, arg);
-        break;
-    case SukiCMD_SHOW_FEATURES:
-        susfs_call_v2(susfs_get_enabled_features, arg);
-        break;
-    case SukiCMD_SHOW_VARIANT:
-        susfs_call_v2(susfs_show_variant, arg);
-        break;
-    case SukiCMD_AVC_SPOOF:
-        susfs_call_v2(susfs_set_avc_log_spoofing, arg);
-        break;
-    case SukiCMD_ADD_MAP:
-        susfs_call_v2(susfs_add_sus_map, arg);
-        break;
-    default:
-        break;
-    }
-}
-#endif
-
 static int anon_ksu_release(struct inode *inode, struct file *filp)
 {
+    kfree(filp->private_data);
     pr_info("ksu fd released\n");
     return 0;
 }
 
 static long anon_ksu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-    return ksu_supercall_handle_ioctl(cmd, (void __user *)arg);
+    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);
 }
 
 static const struct file_operations anon_ksu_fops = {
@@ -241,22 +54,32 @@ static const struct file_operations anon_ksu_fops = {
     .release = anon_ksu_release,
 };
 
-static int ksu_install_fd_flags(unsigned int flags)
+static int ksu_install_fd_with_permissions(unsigned int fd_flags, unsigned long permissions)
 {
+    struct ksu_driver_context *context;
     struct file *filp;
+    const char *name;
     int fd;
 
-    fd = get_unused_fd_flags(flags);
+    context = kzalloc(sizeof(*context), GFP_KERNEL);
+    if (!context)
+        return -ENOMEM;
+
+    context->permissions = permissions;
+    name = permissions & KSU_DRIVER_PERMISSION_SU_SESSION ? "[ksu_driver_su]" : "[ksu_driver]";
+
+    fd = get_unused_fd_flags(fd_flags);
     if (fd < 0) {
         pr_err("ksu_install_fd: failed to get unused fd\n");
+        kfree(context);
         return fd;
     }
 
-    filp = anon_inode_getfile("[ksu_driver]", &anon_ksu_fops, NULL,
-                              O_RDWR | flags);
+    filp = anon_inode_getfile(name, &anon_ksu_fops, context, O_RDWR);
     if (IS_ERR(filp)) {
         pr_err("ksu_install_fd: failed to create anon inode file\n");
         put_unused_fd(fd);
+        kfree(context);
         return PTR_ERR(filp);
     }
 
@@ -267,12 +90,20 @@ static int ksu_install_fd_flags(unsigned int flags)
 
 int ksu_install_fd(void)
 {
-    return ksu_install_fd_flags(O_CLOEXEC);
+    return ksu_install_fd_with_permissions(O_CLOEXEC, 0);
 }
 
-int ksu_install_manager_fd(void)
+int ksu_install_su_fd(void)
 {
-    return ksu_install_fd_flags(0);
+    // This descriptor must be installed after the exec into ksud.
+    return ksu_install_fd_with_permissions(O_CLOEXEC, KSU_DRIVER_PERMISSION_SU_SESSION);
+}
+
+bool ksu_is_su_session_fd(const struct file *filp)
+{
+    const struct ksu_driver_context *context = filp->private_data;
+
+    return context && (context->permissions & KSU_DRIVER_PERMISSION_SU_SESSION);
 }
 
 static void ksu_install_fd_tw_func(struct callback_head *cb)
@@ -292,16 +123,13 @@ static void ksu_install_fd_tw_func(struct callback_head *cb)
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     struct pt_regs *real_regs = PT_REAL_REGS(regs);
-    int magic1 = (int)PT_REGS_PARM1(real_regs);
+    int magic1 = (int)PT_REGS_SYSCALL_PARM1(real_regs);
     int magic2 = (int)PT_REGS_PARM2(real_regs);
 
 #ifdef CONFIG_KSU_SUSFS
-    if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == SukiSUSFS_MAGIC) {
-        unsigned int cmd = (unsigned int)PT_REGS_PARM3(real_regs);
-        void __user *arg = (void __user *)PT_REGS_SYSCALL_PARM4(real_regs);
-        susfs_handle_reboot(cmd, arg);
+    if (ksu_susfs_reboot_handler(magic1, magic2, (unsigned int)PT_REGS_PARM3(real_regs),
+                                 (void __user *)PT_REGS_SYSCALL_PARM4(real_regs)))
         return 0;
-    }
 #endif
 
     if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == KSU_INSTALL_MAGIC2) {

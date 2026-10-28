@@ -1,7 +1,5 @@
 package com.sukisu.ultra.ui.theme
 
-import android.os.Build
-import androidx.annotation.RequiresApi
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
@@ -102,7 +100,6 @@ object ThemeController {
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.S)
 @Composable
 fun KernelSUTheme(
     appSettings: AppSettings = ThemeController.getAppSettings(),
@@ -142,3 +139,5 @@ val LocalEnableFloatingBottomBar = staticCompositionLocalOf { false }
 val LocalEnableFloatingBottomBarBlur = staticCompositionLocalOf { false }
 
 val LocalEnableNavigationBadge = staticCompositionLocalOf { true }
+
+val LocalModuleDescriptionMaxLines = staticCompositionLocalOf { 4 }

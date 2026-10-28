@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::defs;
@@ -116,14 +116,18 @@ pub fn load_config(module_id: &str, config_type: ConfigType) -> Result<HashMap<S
     crate::module::validate_module_id(module_id)?;
 
     let config_path = get_config_path(module_id, config_type);
+    load_config_file(&config_path)
+}
 
+fn load_config_file(config_path: &Path) -> Result<HashMap<String, String>> {
     if !config_path.exists() {
         debug!("Config file not found: {}", config_path.display());
         return Ok(HashMap::new());
     }
 
-    let mut file = File::open(&config_path)
+    let file = File::open(config_path)
         .with_context(|| format!("Failed to open config file: {}", config_path.display()))?;
+    let mut file = BufReader::new(file);
 
     // Read magic
     let mut magic_buf = [0u8; 4];
@@ -149,7 +153,11 @@ pub fn load_config(module_id: &str, config_type: ConfigType) -> Result<HashMap<S
     let mut count_buf = [0u8; 4];
     file.read_exact(&mut count_buf)
         .with_context(|| "Failed to read count")?;
-    let count = u32::from_le_bytes(count_buf);
+    let count = u32::from_le_bytes(count_buf) as usize;
+
+    if count > MAX_CONFIG_COUNT {
+        bail!("Too many config entries: {count} (max: {MAX_CONFIG_COUNT})");
+    }
 
     // Read entries
     let mut config = HashMap::new();
@@ -159,6 +167,10 @@ pub fn load_config(module_id: &str, config_type: ConfigType) -> Result<HashMap<S
         file.read_exact(&mut key_len_buf)
             .with_context(|| format!("Failed to read key length for entry {i}"))?;
         let key_len = u32::from_le_bytes(key_len_buf) as usize;
+
+        if key_len > MAX_CONFIG_KEY_LEN {
+            bail!("Config key too long for entry {i}: {key_len} bytes (max: {MAX_CONFIG_KEY_LEN})");
+        }
 
         // Read key data
         let mut key_buf = vec![0u8; key_len];
@@ -172,6 +184,12 @@ pub fn load_config(module_id: &str, config_type: ConfigType) -> Result<HashMap<S
         file.read_exact(&mut value_len_buf)
             .with_context(|| format!("Failed to read value length for entry {i}"))?;
         let value_len = u32::from_le_bytes(value_len_buf) as usize;
+
+        if value_len > MAX_CONFIG_VALUE_LEN {
+            bail!(
+                "Config value too long for entry {i}: {value_len} bytes (max: {MAX_CONFIG_VALUE_LEN})"
+            );
+        }
 
         // Read value data
         let mut value_buf = vec![0u8; value_len];
@@ -212,11 +230,16 @@ pub fn save_config(
     ensure_config_dir(module_id)?;
 
     let config_path = get_config_path(module_id, config_type);
+    save_config_file(&config_path, config)
+}
+
+fn save_config_file(config_path: &Path, config: &HashMap<String, String>) -> Result<()> {
     let temp_path = config_path.with_extension("tmp");
 
     // Write to temporary file first
-    let mut file = File::create(&temp_path)
+    let file = File::create(&temp_path)
         .with_context(|| format!("Failed to create temp config file: {}", temp_path.display()))?;
+    let mut file = BufWriter::new(file);
 
     // Write magic
     file.write_all(&MODULE_CONFIG_MAGIC.to_le_bytes())
@@ -254,11 +277,14 @@ pub fn save_config(
             .with_context(|| format!("Failed to write value data for '{key}'"))?;
     }
 
-    file.sync_all()
+    file.flush()
+        .with_context(|| "Failed to flush config file")?;
+    file.get_ref()
+        .sync_all()
         .with_context(|| "Failed to sync config file")?;
 
     // Atomic rename
-    fs::rename(&temp_path, &config_path).with_context(|| {
+    fs::rename(&temp_path, config_path).with_context(|| {
         format!(
             "Failed to rename config file: {} -> {}",
             temp_path.display(),
