@@ -59,6 +59,12 @@ Java_com_sukisu_ultra_Natives_isLkmMode(JNIEnv *env, jclass clazz) {
 
 extern "C"
 JNIEXPORT jboolean JNICALL
+Java_com_sukisu_ultra_Natives_isLkmBundled(JNIEnv *env, jclass clazz) {
+    return is_lkm_bundled();
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
 Java_com_sukisu_ultra_Natives_isLateLoadMode(JNIEnv *env, jclass clazz) {
     return is_late_load_mode();
 }
@@ -357,6 +363,30 @@ extern "C"
 JNIEXPORT jint JNICALL
 Java_com_sukisu_ultra_Natives_setSelinuxHideEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     return set_selinux_hide_enabled(enabled);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_sukisu_ultra_Natives_isMountHideEnabled(JNIEnv *env, jobject thiz) {
+    return is_mount_hide_enabled();
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_sukisu_ultra_Natives_setMountHideEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    return set_mount_hide_enabled(enabled);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_sukisu_ultra_Natives_isAvcSpoofEnabled(JNIEnv *env, jobject thiz) {
+    return is_avc_spoof_enabled();
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_sukisu_ultra_Natives_setAvcSpoofEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    return set_avc_spoof_enabled(enabled) == 0;
 }
 
 extern "C"

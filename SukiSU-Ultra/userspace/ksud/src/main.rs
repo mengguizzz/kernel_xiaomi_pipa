@@ -8,6 +8,7 @@
     clippy::doc_markdown,
     clippy::too_many_lines,
     clippy::cast_possible_wrap,
+    clippy::redundant_field_names,
     clippy::large_enum_variant
 )]
 
@@ -22,7 +23,15 @@ mod cli_non_android;
 mod debug;
 mod defs;
 #[cfg(target_os = "android")]
+mod dynamic_manager;
+#[cfg(target_os = "android")]
+mod extension;
+#[cfg(target_os = "android")]
+mod extension_id;
 mod feature;
+mod feature_id;
+#[cfg(target_os = "android")]
+mod hot_install;
 #[cfg(target_os = "android")]
 mod init_event;
 #[cfg(target_arch = "aarch64")]
@@ -42,6 +51,8 @@ mod module;
 #[cfg(target_os = "android")]
 mod module_config;
 #[cfg(target_os = "android")]
+mod preinit;
+#[cfg(target_os = "android")]
 mod profile;
 #[cfg(target_os = "android")]
 mod resetprop;
@@ -49,6 +60,8 @@ mod resetprop;
 mod restorecon;
 #[cfg(target_os = "android")]
 mod sepolicy;
+#[cfg(target_os = "android")]
+mod soft_reboot;
 #[cfg(target_os = "android")]
 mod su;
 #[cfg(target_os = "android")]
@@ -60,11 +73,15 @@ mod susfs_config;
 #[cfg(target_arch = "aarch64")]
 mod susfs_module;
 #[cfg(target_os = "android")]
+mod temporary_root;
+#[cfg(target_os = "android")]
 mod umount;
 #[cfg(target_os = "android")]
 mod unload;
 #[cfg(target_os = "android")]
 mod utils;
+#[cfg(target_os = "android")]
+mod version_spoof;
 
 #[cfg(target_os = "android")]
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]

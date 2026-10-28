@@ -7,7 +7,7 @@ use log::{LevelFilter, error, info};
 
 use crate::boot_patch::{BootPatchArgs, BootRestoreArgs};
 use crate::lkm_image::BootPatchV2Args;
-use crate::module::regenerate_preinit_rc;
+use crate::module::regenerate_preinit;
 #[cfg(target_arch = "aarch64")]
 use crate::susfs;
 use crate::{
@@ -26,6 +26,11 @@ struct Args {
 #[derive(clap::Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Best-effort userspace temporary root leases (not kernel-enforced)
+    TemporaryRoot {
+        #[command(subcommand)]
+        command: TemporaryRoot,
+    },
     /// Manage KernelSU modules
     Module {
         #[command(subcommand)]
@@ -124,6 +129,12 @@ enum Commands {
         command: Feature,
     },
 
+    /// Manage kernel extensions (KPM, CPU spoof, umount paths, dynamic manager)
+    Extension {
+        #[command(subcommand)]
+        command: Extension,
+    },
+
     /// Patch boot or init_boot images to apply KernelSU
     BootPatch(BootPatchArgs),
 
@@ -134,6 +145,12 @@ enum Commands {
     ///
     /// Always operates on a boot image; never selects init_boot or vendor_boot.
     BootPatchV2(BootPatchV2Args),
+
+    /// Extract or replace the kernel block without modifying the ramdisk.
+    BootKernel {
+        #[command(subcommand)]
+        command: crate::boot_patch::BootKernelCommand,
+    },
 
     /// Show boot information
     BootInfo {
@@ -185,6 +202,12 @@ enum Commands {
     Susfs {
         #[command(subcommand)]
         command: Susfs,
+    },
+
+    /// Manage dynamic userspace managers
+    Manager {
+        #[command(subcommand)]
+        command: Manager,
     },
 }
 
@@ -366,6 +389,12 @@ enum Module {
     /// list all modules
     List,
 
+    /// preinit actions run before SELinux policy is loaded
+    Preinit {
+        #[command(subcommand)]
+        command: PreinitCmd,
+    },
+
     /// manage module configuration
     Config {
         /// target internal module name (resolved as internal.<name>)
@@ -374,6 +403,14 @@ enum Module {
         #[command(subcommand)]
         command: ModuleConfigCmd,
     },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum PreinitCmd {
+    /// show per-module preinit state for the next boot
+    Status,
+    /// re-enable preinit after it was disabled by repeated failed boots
+    Reset,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -459,10 +496,37 @@ enum Profile {
 }
 
 #[derive(clap::Subcommand, Debug)]
+enum TemporaryRoot {
+    Set {
+        uid: i32,
+        key: String,
+        manager: u32,
+        seconds: u64,
+    },
+    Clear {
+        uid: i32,
+    },
+    Status {
+        uid: i32,
+    },
+    /// Atomically save a profile and its lease under the watcher lock.
+    Apply {
+        manager: u32,
+        lease: String,
+        #[arg(action = clap::ArgAction::Set)]
+        expected_root: bool,
+        json: String,
+    },
+    #[command(hide = true)]
+    Watch,
+}
+
+#[derive(clap::Subcommand, Debug)]
 enum Feature {
     /// Get feature value and support status
     Get {
-        /// Feature ID or name (su_compat, kernel_umount, sulog, adb_root, selinux_hide)
+        /// Feature ID or name (su_compat, kernel_umount, sulog, adb_root, selinux_hide, avc_spoof,
+        /// shell_su_adb_only, mount_hide)
         id: String,
         /// Read from config file
         #[arg(long, default_value_t = false)]
@@ -480,9 +544,10 @@ enum Feature {
     /// List all available features
     List,
 
-    /// Check feature status (supported/unsupported/managed)
+    /// Check feature status (supported/unsupported/managed/forced)
     Check {
-        /// Feature ID or name (su_compat, kernel_umount, sulog, adb_root, selinux_hide)
+        /// Feature ID or name (su_compat, kernel_umount, sulog, adb_root, selinux_hide, avc_spoof,
+        /// shell_su_adb_only, mount_hide)
         id: String,
     },
 
@@ -491,6 +556,75 @@ enum Feature {
 
     /// Save current kernel feature states to file
     Save,
+}
+
+#[derive(clap::Subcommand, Debug)]
+#[clap(name = "extension")]
+enum Extension {
+    /// Configure KernelSU version responses
+    VersionSpoof {
+        #[command(subcommand)]
+        command: VersionSpoof,
+    },
+    /// Get extension value and support status
+    Get {
+        /// Extension ID or name (kpm, cpu_spoof, umount_paths, dynamic_manager)
+        id: String,
+        /// Read from config file
+        #[arg(long, default_value_t = false)]
+        config: bool,
+    },
+
+    /// Set extension sticky value (the toggle bit shown in UI)
+    Set {
+        /// Extension ID or name
+        id: String,
+        /// Extension value (0=disable, 1=enable)
+        value: u64,
+    },
+
+    /// List all known extensions with their current kernel support state
+    List,
+
+    /// Check extension status (supported/unsupported/managed/forced)
+    Check {
+        /// Extension ID or name (kpm, cpu_spoof, umount_paths, dynamic_manager)
+        id: String,
+    },
+
+    /// Load extension configuration from file and apply to kernel
+    Load,
+
+    /// Save current extension states to file
+    Save,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum VersionSpoof {
+    /// Read current kernel overrides as JSON
+    Get,
+    /// Replace all overrides; omitted fields use build values
+    Set {
+        #[arg(long)]
+        version: Option<u32>,
+        #[arg(long)]
+        full: Option<String>,
+        #[arg(long)]
+        uapi: Option<u32>,
+        /// Confirm that custom version/UAPI values can break compatibility.
+        #[arg(long, default_value_t = false)]
+        acknowledge_compatibility: bool,
+    },
+    /// Restore build values and remove saved overrides
+    Reset,
+    /// Read the home-page version warning visibility setting
+    WarningGet,
+    /// Set whether the home-page version warning is hidden
+    WarningSet {
+        /// `true` hides the warning; `false` shows it
+        #[arg(long)]
+        hidden: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -557,7 +691,7 @@ enum UmountOp {
 
 #[derive(clap::Subcommand, Debug)]
 enum Initrc {
-    /// Regenerate preinit rc file
+    /// Regenerate preinit rc file and preinit dirs
     Refresh,
 }
 
@@ -619,6 +753,8 @@ enum Susfs {
     Version,
     /// Get SUSFS Variant
     Variant,
+    /// Get SUSFS implementation: builtin, lkm, unsupported or unknown
+    Implementation,
     /// Get SUSFS enabled Features
     Features,
     /// Spoof kernel uname
@@ -657,6 +793,8 @@ enum Susfs {
         /// uid scheme
         uid_scheme: u32,
     },
+    /// Replace the priority UID filter with a comma-separated package list
+    SetPriorityUidFilter { packages: String },
     /// Add SUS map
     AddSusMap {
         /// library path
@@ -691,30 +829,30 @@ enum Susfs {
     AddSusKstatStatically {
         /// path
         path: String,
-        /// ino
-        ino: u64,
-        /// dev
-        dev: u64,
-        /// nlink
-        nlink: u32,
-        /// size
-        size: u64,
-        /// atime sec
-        atime_sec: i64,
-        /// atime nsec
-        atime_nsec: u64,
-        /// mtime sec
-        mtime_sec: i64,
-        /// mtime nsec
-        mtime_nsec: u64,
-        /// ctime sec
-        ctime_sec: i64,
-        /// ctime nsec
-        ctime_nsec: u64,
-        /// blocks
-        blocks: u64,
-        /// blksize
-        blksize: i64,
+        /// ino (`default` keeps the current value)
+        ino: String,
+        /// dev (`default` keeps the current value)
+        dev: String,
+        /// nlink (`default` keeps the current value)
+        nlink: String,
+        /// size (`default` keeps the current value)
+        size: String,
+        /// atime sec (`default` keeps the current value)
+        atime_sec: String,
+        /// atime nsec (`default` keeps the current value)
+        atime_nsec: String,
+        /// mtime sec (`default` keeps the current value)
+        mtime_sec: String,
+        /// mtime nsec (`default` keeps the current value)
+        mtime_nsec: String,
+        /// ctime sec (`default` keeps the current value)
+        ctime_sec: String,
+        /// ctime nsec (`default` keeps the current value)
+        ctime_nsec: String,
+        /// blocks (`default` keeps the current value)
+        blocks: String,
+        /// blksize (`default` keeps the current value)
+        blksize: String,
     },
     /// Manage the SuSFS Magisk auto-start module
     Module {
@@ -728,6 +866,24 @@ enum Susfs {
         #[clap(subcommand)]
         command: SusfsConfigCmd,
     },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Manager {
+    /// List dynamic managers and global state
+    List,
+    /// Authorize a manager using its package, certificate size and SHA-256
+    Add {
+        package: String,
+        cert_size: u32,
+        hash: String,
+    },
+    /// Remove a manager by package name
+    Remove { package: String },
+    /// Enable or disable dynamic managers (true/false or 1/0)
+    SetEnabled { enabled: String },
+    /// Remove all dynamic managers
+    Clear,
 }
 
 /// susfs module subcommands
@@ -768,7 +924,10 @@ pub enum SusfsConfigCmd {
     /// Reset all config keys to defaults
     Reset,
     /// List all config key=value pairs (one per line)
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -777,6 +936,8 @@ pub fn run() -> Result<()> {
             .with_max_level(crate::debug_select!(LevelFilter::Trace, LevelFilter::Info))
             .with_tag("KernelSU"),
     );
+
+    ksucalls::setup_sigsys_handler();
 
     // the kernel executes su with argv[0] = "su" and replace it with us
     let arg0 = std::env::args().next().unwrap_or_default();
@@ -794,13 +955,13 @@ pub fn run() -> Result<()> {
     log::info!("command: {:?}", cli.command);
 
     let result = match cli.command {
-        Commands::PostFsData => init_event::on_post_data_fs(),
+        Commands::PostFsData => init_event::on_post_fs_data(),
         Commands::BootCompleted => {
             init_event::on_boot_completed();
             Ok(())
         }
 
-        Commands::SoftReboot => init_event::soft_reboot(),
+        Commands::SoftReboot => crate::soft_reboot::soft_reboot(),
 
         Commands::Insmod { module, params } => debug::insmod(&module, &params),
 
@@ -818,6 +979,13 @@ pub fn run() -> Result<()> {
                     module::run_lua(&id, &function, false, true).map_err(|e| anyhow::anyhow!("{e}"))
                 }
                 Module::List => module::list_modules(),
+                Module::Preinit { command } => match command {
+                    PreinitCmd::Status => {
+                        crate::preinit::print_status();
+                        Ok(())
+                    }
+                    PreinitCmd::Reset => crate::preinit::reset_bootcount(),
+                },
                 Module::Config { internal, command } => {
                     let module_id = match internal {
                         Some(internal_name) => format!("internal.{internal_name}"),
@@ -960,6 +1128,23 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Commands::Sulogd => sulog::run_sulogd(),
+        Commands::TemporaryRoot { command } => match command {
+            TemporaryRoot::Set {
+                uid,
+                key,
+                manager,
+                seconds,
+            } => crate::temporary_root::set(uid, key, manager, seconds),
+            TemporaryRoot::Clear { uid } => crate::temporary_root::clear(uid),
+            TemporaryRoot::Status { uid } => crate::temporary_root::status(uid),
+            TemporaryRoot::Apply {
+                manager,
+                lease,
+                expected_root,
+                json,
+            } => crate::temporary_root::apply(manager, &lease, expected_root, &json),
+            TemporaryRoot::Watch => crate::temporary_root::watch(),
+        },
         Commands::Profile { command } => match command {
             Profile::GetSepolicy { package } => crate::profile::get_sepolicy(package),
             Profile::SetSepolicy { package, policy } => {
@@ -971,6 +1156,47 @@ pub fn run() -> Result<()> {
             Profile::ListTemplates => crate::profile::list_templates(),
         },
 
+        Commands::Manager { command } => match command {
+            Manager::List => {
+                let state = crate::dynamic_manager::manager_get()?;
+                println!("enabled: {}", state.enabled != 0);
+                for entry in state.entries.iter().take(state.count as usize) {
+                    let package = String::from_utf8_lossy(unsafe {
+                        std::slice::from_raw_parts(
+                            entry.package.as_ptr().cast::<u8>(),
+                            entry.package.len(),
+                        )
+                    })
+                    .trim_end_matches('\0')
+                    .to_string();
+                    let hash = String::from_utf8_lossy(unsafe {
+                        std::slice::from_raw_parts(
+                            entry.hash.as_ptr().cast::<u8>(),
+                            entry.hash.len(),
+                        )
+                    })
+                    .trim_end_matches('\0')
+                    .to_string();
+                    println!("{package}\t{}\t{hash}\t{}", entry.cert_size, entry.uid);
+                }
+                Ok(())
+            }
+            Manager::Add {
+                package,
+                cert_size,
+                hash,
+            } => crate::dynamic_manager::manager_add(&package, cert_size, &hash),
+            Manager::Remove { package } => crate::dynamic_manager::manager_remove(&package),
+            Manager::SetEnabled { enabled } => {
+                let enabled = match enabled.as_str() {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => anyhow::bail!("enabled must be true, false, 1, or 0"),
+                };
+                crate::dynamic_manager::manager_set_enabled(enabled)
+            }
+            Manager::Clear => crate::dynamic_manager::manager_clear(),
+        },
         Commands::Feature { command } => match command {
             Feature::Get { id, config } => {
                 if config {
@@ -988,12 +1214,46 @@ pub fn run() -> Result<()> {
             Feature::Load => crate::feature::load_config_and_apply(),
             Feature::Save => crate::feature::save_config(),
         },
+        Commands::Extension { command } => match command {
+            Extension::VersionSpoof { command } => match command {
+                VersionSpoof::Get => crate::version_spoof::print_config(),
+                VersionSpoof::Set {
+                    version,
+                    full,
+                    uapi,
+                    acknowledge_compatibility,
+                } => crate::version_spoof::set(version, full, uapi, acknowledge_compatibility),
+                VersionSpoof::Reset => crate::version_spoof::reset(),
+                VersionSpoof::WarningGet => {
+                    println!("{}", crate::version_spoof::warning_hidden()?);
+                    Ok(())
+                }
+                VersionSpoof::WarningSet { hidden } => {
+                    crate::version_spoof::set_warning_hidden(hidden)
+                }
+            },
+            Extension::Get { id, config } => {
+                if config {
+                    crate::extension::get_extension_config_cli(&id)
+                } else {
+                    crate::extension::get_extension_cli(&id)
+                }
+            }
+            Extension::Set { id, value } => crate::extension::set_extension_cli(&id, value),
+            Extension::List => {
+                crate::extension::list_extensions();
+                Ok(())
+            }
+            Extension::Check { id } => crate::extension::check_extension(&id),
+            Extension::Load => crate::extension::load_config_and_apply(),
+            Extension::Save => crate::extension::save_config(),
+        },
 
         Commands::Debug { command } => match command {
             Debug::SetManager { apk } => debug::set_manager(&apk),
             Debug::GetSign { apk } => {
                 let sign = apk_sign::get_apk_signature(&apk)?;
-                println!("size: {:#x}, hash: {}", sign.0, sign.1);
+                println!("size: {}, hash: {}", sign.0, sign.1);
                 Ok(())
             }
             Debug::Version => {
@@ -1020,6 +1280,10 @@ pub fn run() -> Result<()> {
                 println!("uapi_version: {}", info.uapi_version);
                 println!("features: 0x{:x}", info.features);
                 println!("lkm: {}", ksucalls::is_lkm());
+                println!(
+                    "bundled: {}",
+                    (info.flags & ksu_uapi::KSU_GET_INFO_FLAG_BUNDLED) != 0
+                );
                 println!("late_load: {}", ksucalls::is_late_load());
                 println!("runtime_mode: {}", ksucalls::runtime_mode());
                 println!(
@@ -1085,6 +1349,7 @@ pub fn run() -> Result<()> {
         },
         Commands::BootRestore(boot_restore) => crate::boot_patch::restore(boot_restore),
         Commands::BootPatchV2(patch) => crate::lkm_image::patch_boot(&patch),
+        Commands::BootKernel { command } => crate::boot_patch::boot_kernel(command),
         Commands::Resetprop { args } => {
             let mut full_args = vec!["resetprop".to_string()];
             full_args.extend(args);
@@ -1096,7 +1361,7 @@ pub fn run() -> Result<()> {
             Kernel::Umount { command } => match command {
                 UmountOp::Add { mnt, flags } => ksucalls::umount_list_add(&mnt, flags),
                 UmountOp::Del { mnt } => ksucalls::umount_list_del(&mnt),
-                UmountOp::Wipe => ksucalls::umount_list_wipe().map_err(Into::into),
+                UmountOp::Wipe => ksucalls::umount_list_wipe(),
             },
             Kernel::NotifyModuleMounted => {
                 ksucalls::report_module_mounted();
@@ -1116,7 +1381,7 @@ pub fn run() -> Result<()> {
             } => ksucalls::set_spoof_cpu(cpu, midr, bogomips, hwcap, hwcap2),
         },
         Commands::Initrc { command } => match command {
-            Initrc::Refresh => regenerate_preinit_rc(),
+            Initrc::Refresh => regenerate_preinit(),
         },
         Commands::Umount { command } => match command {
             Umount::Add { mnt, flags } => ksucalls::umount_list_add(&mnt, flags),
@@ -1137,12 +1402,12 @@ pub fn run() -> Result<()> {
                 Kpm::Load { path, args } => {
                     crate::kpm::load_module(path.to_str().unwrap(), args.as_deref())
                 }
-                Kpm::Unload { name } => crate::kpm::unload_module(name),
+                Kpm::Unload { name } => crate::kpm::unload_module(&name),
                 Kpm::Num => crate::kpm::num().map(|_| ()),
                 Kpm::List => crate::kpm::list(),
-                Kpm::Info { name } => crate::kpm::info(name),
+                Kpm::Info { name } => crate::kpm::info(&name),
                 Kpm::Control { name, args } => {
-                    let ret = crate::kpm::control(name, args)?;
+                    let ret = crate::kpm::control(&name, args)?;
                     println!("{ret}");
                     Ok(())
                 }
@@ -1164,6 +1429,10 @@ pub fn run() -> Result<()> {
                     println!("{}", susfs::get_susfs_variant());
                     Ok(())
                 }
+                Susfs::Implementation => {
+                    println!("{}", susfs::get_susfs_implementation());
+                    Ok(())
+                }
                 Susfs::Features => {
                     println!("{}", susfs::get_susfs_features());
                     Ok(())
@@ -1182,6 +1451,9 @@ pub fn run() -> Result<()> {
                     redirected,
                     uid_scheme,
                 } => susfs::add_open_redirect(&target, &redirected, uid_scheme),
+                Susfs::SetPriorityUidFilter { packages } => {
+                    susfs::set_priority_uid_filter(&packages)
+                }
                 Susfs::AddSusMap { path } => susfs::add_sus_map(&path),
                 Susfs::AddSusPath { path } => susfs::add_sus_path(&path),
                 Susfs::AddSusPathLoop { path } => susfs::add_sus_path_loop(&path),
@@ -1205,8 +1477,19 @@ pub fn run() -> Result<()> {
                     blocks,
                     blksize,
                 } => susfs::add_sus_kstat_statically(
-                    &path, ino, dev, nlink, size, atime_sec, atime_nsec, mtime_sec, mtime_nsec,
-                    ctime_sec, ctime_nsec, blocks, blksize,
+                    &path,
+                    &ino,
+                    &dev,
+                    &nlink,
+                    &size,
+                    &atime_sec,
+                    &atime_nsec,
+                    &mtime_sec,
+                    &mtime_nsec,
+                    &ctime_sec,
+                    &ctime_nsec,
+                    &blocks,
+                    &blksize,
                 ),
                 Susfs::Module { command } => {
                     use crate::susfs_module;
@@ -1214,12 +1497,10 @@ pub fn run() -> Result<()> {
                         SusfsModuleCmd::Install => {
                             susfs_module::install_module()?;
                             println!("SuSFS module installed successfully");
-                            Ok(())
                         }
                         SusfsModuleCmd::Remove => {
                             susfs_module::remove_module()?;
                             println!("SuSFS module removed successfully");
-                            Ok(())
                         }
                         SusfsModuleCmd::Status => {
                             if susfs_module::is_module_installed() {
@@ -1227,42 +1508,42 @@ pub fn run() -> Result<()> {
                             } else {
                                 println!("not installed");
                             }
-                            Ok(())
                         }
                     }
+                    Ok(())
                 }
                 Susfs::Config { command } => {
                     use crate::susfs_config;
                     match command {
                         SusfsConfigCmd::Get { key } => {
                             println!("{}", susfs_config::get(&key)?);
-                            Ok(())
                         }
                         SusfsConfigCmd::Set { key, value } => {
                             susfs_config::set(&key, &value)?;
                             println!("ok");
-                            Ok(())
                         }
                         SusfsConfigCmd::Remove { key } => {
                             susfs_config::remove(&key)?;
                             println!("ok");
-                            Ok(())
                         }
                         SusfsConfigCmd::Clear => {
                             susfs_config::clear()?;
                             println!("ok");
-                            Ok(())
                         }
                         SusfsConfigCmd::Reset => {
                             susfs_config::reset_to_defaults()?;
                             println!("ok");
-                            Ok(())
                         }
-                        SusfsConfigCmd::List => {
-                            println!("{}", susfs_config::export_json()?);
-                            Ok(())
+                        SusfsConfigCmd::List { json } => {
+                            let output = if json {
+                                serde_json::to_string(&susfs_config::store::load_config()?)?
+                            } else {
+                                susfs_config::export_json()?
+                            };
+                            println!("{output}");
                         }
                     }
+                    Ok(())
                 }
             };
             Ok(())

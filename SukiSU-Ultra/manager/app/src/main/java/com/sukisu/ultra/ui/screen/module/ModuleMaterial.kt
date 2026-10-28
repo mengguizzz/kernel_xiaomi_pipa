@@ -11,9 +11,6 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -50,7 +47,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -63,14 +60,14 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CheckableDropdownMenuItem
 import androidx.compose.material3.DropdownMenuGroup
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -106,6 +103,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
@@ -122,10 +120,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
@@ -144,9 +142,12 @@ import com.sukisu.ultra.ui.component.material.ExpressiveSwitch
 import com.sukisu.ultra.ui.component.material.SearchAppBar
 import com.sukisu.ultra.ui.component.material.SnackBarHost
 import com.sukisu.ultra.ui.component.material.TonalCard
-import com.sukisu.ultra.ui.component.rebootlistpopup.RebootListPopup
 import com.sukisu.ultra.ui.component.statustag.StatusTag
+import com.sukisu.ultra.ui.theme.LocalModuleDescriptionMaxLines
 import com.sukisu.ultra.ui.util.reboot
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
+import top.yukonga.miuix.kmp.nav.gesture.WindowNavigationEventBridge
 
 @SuppressLint("StringFormatInvalid")
 @Composable
@@ -241,6 +242,7 @@ fun ModulePagerMaterial(
                 html = it.html,
                 confirm = it.confirm,
                 dismiss = it.dismiss,
+                restricted = it.restricted,
             )
         }
     }
@@ -292,8 +294,6 @@ fun ModulePagerMaterial(
                     }
                 },
                 actions = {
-                    RebootListPopup()
-
                     var showDropdown by remember { mutableStateOf(false) }
                     IconButton(
                         onClick = { showDropdown = true }
@@ -307,23 +307,7 @@ fun ModulePagerMaterial(
                             onDismissRequest = { showDropdown = false }
                         ) {
                             DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.module_sort_action_first)) },
-                                    checked = uiState.sortActionFirst,
-                                    checkedLeadingIcon = {
-                                        Icon(
-                                            Icons.Filled.Check,
-                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
-                                            contentDescription = null,
-                                        )
-                                    },
-                                    onCheckedChange = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
-                                        actions.onToggleSortActionFirst()
-                                    },
-                                    shapes = MenuDefaults.itemShape(index = 0, count = 2),
-                                )
-                                DropdownMenuItem(
+                                CheckableDropdownMenuItem(
                                     text = { Text(stringResource(R.string.module_sort_enabled_first)) },
                                     checked = uiState.sortEnabledFirst,
                                     checkedLeadingIcon = {
@@ -337,7 +321,119 @@ fun ModulePagerMaterial(
                                         haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
                                         actions.onToggleSortEnabledFirst()
                                     },
-                                    shapes = MenuDefaults.itemShape(index = 1, count = 2),
+                                    shapes = MenuDefaults.itemShape(index = 0, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_metamodule_first)) },
+                                    checked = uiState.sortMetamoduleFirst,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onToggleSortMetamoduleFirst()
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 1, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_zygisk_first)) },
+                                    checked = uiState.sortZygiskFirst,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onToggleSortZygiskFirst()
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 2, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_webui_first)) },
+                                    checked = uiState.sortWebUiFirst,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onToggleSortWebUiFirst()
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 3, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_action_first)) },
+                                    checked = uiState.sortActionFirst,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onToggleSortActionFirst()
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 4, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_name_asc)) },
+                                    checked = uiState.sortNameOrder == ModuleNameSort.ASCENDING,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onSetSortNameOrder(ModuleNameSort.ASCENDING)
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 5, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_name_desc)) },
+                                    checked = uiState.sortNameOrder == ModuleNameSort.DESCENDING,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onSetSortNameOrder(ModuleNameSort.DESCENDING)
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 6, count = 8),
+                                )
+                                CheckableDropdownMenuItem(
+                                    text = { Text(stringResource(R.string.module_sort_manual)) },
+                                    checked = uiState.sortManual,
+                                    checkedLeadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            modifier = Modifier.size(MenuDefaults.LeadingIconSize),
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onCheckedChange = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                                        actions.onToggleSortManual()
+                                    },
+                                    shapes = MenuDefaults.itemShape(index = 7, count = 8),
                                 )
                             }
                         }
@@ -357,12 +453,6 @@ fun ModulePagerMaterial(
                         displayModules = uiState.searchResults,
                         updateInfoMap = uiState.updateInfo,
                         actions = actions,
-                        onClickModule = { module ->
-                            if (module.hasWebUi) {
-                                actions.onOpenWebUi(module)
-                                closeSearch()
-                            }
-                        },
                         onModuleAddShortcut = { module, type -> onModuleAddShortcut(module, type) },
                         closeSearch = closeSearch,
                     )
@@ -397,10 +487,12 @@ fun ModulePagerMaterial(
                     modifier = Modifier.padding(bottom = bottomInnerPadding),
                     expanded = fabExpanded,
                     onClick = {
-                        // Select the zip files to install
-                        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        // Write access lets the manager delete the picked ZIP after a successful install
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
                             type = "application/zip"
                             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                         }
                         selectZipLauncher.launch(intent)
                     },
@@ -458,6 +550,11 @@ fun ModulePagerMaterial(
                 listState,
                 uiState.sortEnabledFirst,
                 uiState.sortActionFirst,
+                uiState.sortWebUiFirst,
+                uiState.sortZygiskFirst,
+                uiState.sortMetamoduleFirst,
+                uiState.sortNameOrder,
+                uiState.sortManual,
                 refreshTick.intValue,
                 isBusy = { latestRefreshing.value },
             ) { latestModuleList.value }
@@ -468,12 +565,22 @@ fun ModulePagerMaterial(
                 displayModules = uiState.moduleList,
                 updateInfoMap = uiState.updateInfo,
                 actions = actions,
-                onClickModule = { module ->
-                    if (module.hasWebUi) {
-                        actions.onOpenWebUi(module)
+                onModuleAddShortcut = { module, type -> onModuleAddShortcut(module, type) },
+                reorderEnabled = uiState.sortManual,
+                header = if (uiState.moduleList.isEmpty()) null else {
+                    {
+                        Text(
+                            text = stringResource(
+                                R.string.module_summary,
+                                uiState.moduleList.count { it.enabled },
+                                uiState.updateInfo.count { it.value.downloadUrl.isNotBlank() },
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
                     }
                 },
-                onModuleAddShortcut = { module, type -> onModuleAddShortcut(module, type) },
             )
         }
     }
@@ -502,50 +609,84 @@ private fun ModuleList(
     displayModules: List<Module>,
     updateInfoMap: Map<String, ModuleUpdateInfo>,
     actions: ModuleActions,
-    onClickModule: (Module) -> Unit,
     onModuleAddShortcut: (Module, ShortcutType) -> Unit,
+    reorderEnabled: Boolean = false,
     closeSearch: () -> Unit? = {},
+    header: (@Composable () -> Unit)? = null,
 ) {
     val loadingDialog = rememberLoadingDialog()
+    val haptic = LocalHapticFeedback.current
+    val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
+        val fromModule = displayModules.firstOrNull { it.id == from.key }
+        val toModule = displayModules.firstOrNull { it.id == to.key }
+        if (fromModule != null && toModule != null) {
+            actions.onMoveModule(fromModule, toModule)
+        }
+    }
     LazyColumn(
         state = listState,
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(13.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(
             start = 16.dp,
             end = 16.dp,
             bottom = 16.dp + bottomInnerPadding + 56.dp + 16.dp
         ),
     ) {
+        if (header != null) {
+            item(key = "header", contentType = "header") { header() }
+        }
         items(displayModules, key = { it.id }, contentType = { "module" }) { module ->
             val scope = rememberCoroutineScope()
             val moduleUpdateInfo = updateInfoMap[module.id] ?: ModuleUpdateInfo.Empty
 
-            ModuleItem(
-                module = module,
-                updateUrl = moduleUpdateInfo.downloadUrl,
-                onUninstallClicked = {
-                    if (module.remove) {
-                        actions.onUndoUninstallModule(module)
-                    } else {
-                        actions.onRequestUninstallConfirmation(module)
-                    }
-                },
-                onCheckChanged = {
-                    actions.onToggleModule(module)
-                },
-                onUpdate = {
-                    scope.launch {
-                        loadingDialog.withLoading {
-                            actions.onRequestUpdateConfirmation(module, moduleUpdateInfo)
+            ReorderableItem(
+                state = reorderableState,
+                key = module.id,
+                enabled = reorderEnabled,
+            ) { _ ->
+                ModuleItem(
+                    module = module,
+                    updateUrl = moduleUpdateInfo.downloadUrl,
+                    onUninstallClicked = {
+                        if (module.remove) {
+                            actions.onUndoUninstallModule(module)
+                        } else {
+                            actions.onRequestUninstallConfirmation(module)
                         }
-                    }
-                },
-                onAddShortcut = { type -> onModuleAddShortcut(module, type) },
-                onClick = { onClickModule(module) },
-                onExecuteAction = { actions.onExecuteModuleAction(module) },
-                closeSearch = { closeSearch() }
-            )
+                    },
+                    onCheckChanged = {
+                        actions.onToggleModule(module)
+                    },
+                    onUpdate = {
+                        scope.launch {
+                            loadingDialog.withLoading {
+                                actions.onRequestUpdateConfirmation(module, moduleUpdateInfo)
+                            }
+                        }
+                    },
+                    onAddShortcut = { type -> onModuleAddShortcut(module, type) },
+                    onOpenWebUi = {
+                        if (module.hasWebUi) {
+                            actions.onOpenWebUi(module)
+                        }
+                    },
+                    onExecuteAction = { actions.onExecuteModuleAction(module) },
+                    closeSearch = { closeSearch() },
+                    dragHandleModifier = if (reorderEnabled) {
+                        Modifier.draggableHandle(
+                            onDragStarted = {
+                                haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                            },
+                            onDragStopped = {
+                                actions.onCommitManualOrder()
+                            },
+                        )
+                    } else {
+                        null
+                    },
+                )
+            }
         }
     }
 }
@@ -566,7 +707,7 @@ private fun ModuleShortcutSheet(
     fun copyShortcutUrl() {
         val url = shortcutState.buildShortcutUrl() ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("KernelSU deep link", url))
+        clipboard.setPrimaryClip(ClipData.newPlainText("SukiSU deep link", url))
         Toast.makeText(context, resources.getString(R.string.module_shortcut_scheme_copied), Toast.LENGTH_SHORT).show()
     }
 
@@ -574,6 +715,7 @@ private fun ModuleShortcutSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
     ) {
+        WindowNavigationEventBridge()
         Column(
             verticalArrangement = Arrangement.spacedBy(10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -710,123 +852,143 @@ private fun ModuleItem(
     onCheckChanged: (Boolean) -> Unit,
     onUpdate: () -> Unit,
     onAddShortcut: (ShortcutType) -> Unit,
-    onClick: () -> Unit,
+    onOpenWebUi: () -> Unit,
     onExecuteAction: () -> Unit,
-    closeSearch: () -> Unit
+    closeSearch: () -> Unit,
+    dragHandleModifier: Modifier? = null,
 ) {
+    val hasDescription = module.description.isNotBlank()
+    val maxLinesLimit = LocalModuleDescriptionMaxLines.current
+    var expanded by rememberSaveable(module.id) { mutableStateOf(false) }
+    var descriptionCanExpand by rememberSaveable(module.id) { mutableStateOf(true) }
+    val canOpenWebUi = module.hasWebUi && !module.remove && module.enabled
+    val cardInteractionSource = remember { MutableInteractionSource() }
+    val descriptionInteractionSource = remember { MutableInteractionSource() }
+    val dragHandleInteractionSource = remember { MutableInteractionSource() }
+    val banner = rememberModuleBanner(module.id, module.bannerPath)
+
     TonalCard(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        interactionSource = cardInteractionSource,
+        onClick = {
+            if (canOpenWebUi) {
+                onOpenWebUi()
+                closeSearch()
+            } else if (hasDescription) {
+                expanded = !expanded
+            }
+        }
     ) {
         val haptic = LocalHapticFeedback.current
         val textDecoration = if (!module.remove) null else TextDecoration.LineThrough
-        val interactionSource = remember { MutableInteractionSource() }
-        val indication = LocalIndication.current
-        var expanded by rememberSaveable(module.id) { mutableStateOf(false) }
-        var isOverflowing by remember { mutableStateOf(false) }
 
         Column(
             modifier = Modifier
-                .run {
-                    if (module.hasWebUi) {
-                        toggleable(
-                            value = module.enabled,
-                            enabled = !module.remove && module.enabled,
-                            interactionSource = interactionSource,
-                            role = Role.Button,
-                            indication = indication,
-                            onValueChange = { onClick() }
-                        )
-                    } else {
-                        this
-                    }
-                }
-                .padding(16.dp, 14.dp, 16.dp, 10.dp)
+                .alpha(if (module.enabled || module.remove) 1f else 0.6f)
+                .moduleBanner(banner, MaterialTheme.colorScheme.surfaceBright)
+                .padding(18.dp, 16.dp, 16.dp, 12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                val moduleVersion = stringResource(id = R.string.module_version)
-                val moduleAuthor = stringResource(id = R.string.module_author)
-
                 Column(
-                    modifier = Modifier.fillMaxWidth(0.8f)
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text(
-                        text = module.name,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.titleMedium,
-                        lineHeight = MaterialTheme.typography.bodySmall.lineHeight,
-                        textDecoration = textDecoration,
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = module.name,
+                            modifier = Modifier.weight(1f, fill = false),
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium,
+                            textDecoration = textDecoration,
+                        )
+                        if (updateUrl.isNotEmpty()) {
+                            StatusTag(
+                                label = stringResource(R.string.module_update),
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                                backgroundColor = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
 
                     Text(
-                        text = "$moduleVersion: ${module.version}",
+                        text = "${module.version}, ${module.author}",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                        textDecoration = textDecoration
-                    )
-
-                    Text(
-                        text = "$moduleAuthor: ${module.author}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
                         textDecoration = textDecoration
                     )
                 }
 
-                Spacer(modifier = Modifier.weight(1f))
+                ExpressiveSwitch(
+                    enabled = !module.update,
+                    checked = module.enabled,
+                    onCheckedChange = {
+                        haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
+                        onCheckChanged(it)
+                    }
+                )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    ExpressiveSwitch(
-                        enabled = !module.update,
-                        checked = module.enabled,
-                        onCheckedChange = {
-                            haptic.performHapticFeedback(HapticFeedbackType.VirtualKey)
-                            onCheckChanged(it)
-                        },
-                        interactionSource = if (!module.hasWebUi) interactionSource else remember { MutableInteractionSource() }
-                    )
+                if (dragHandleModifier != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .then(dragHandleModifier)
+                            .clickable(
+                                interactionSource = dragHandleInteractionSource,
+                                indication = null,
+                                onClick = {},
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DragHandle,
+                            contentDescription = stringResource(R.string.module_sort_manual_drag),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            if (hasDescription) {
+                Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                modifier = Modifier
-                    .animateContentSize(
-                        animationSpec = tween(
-                            durationMillis = 250,
-                            easing = FastOutSlowInEasing
-                        )
-                    )
-                    .then(
-                        if (isOverflowing || expanded) {
-                            Modifier.clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { expanded = !expanded }
-                        } else {
-                            Modifier
-                        }
-                    ),
-                text = module.description,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
-                maxLines = if (expanded) Int.MAX_VALUE else 4,
-                textDecoration = textDecoration,
-                onTextLayout = { textLayoutResult ->
-                    isOverflowing = if (expanded) {
-                        textLayoutResult.lineCount > 4
-                    } else {
-                        textLayoutResult.hasVisualOverflow
-                    }
-                }
-            )
+                ExpandableDescriptionText(
+                    text = module.description,
+                    expanded = expanded,
+                    maxLinesLimit = maxLinesLimit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (canOpenWebUi) {
+                                Modifier.clickable(
+                                    interactionSource = descriptionInteractionSource,
+                                    indication = null
+                                ) {
+                                    if (descriptionCanExpand) {
+                                        expanded = !expanded
+                                    } else {
+                                        onOpenWebUi()
+                                        closeSearch()
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            }
+                        ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textDecoration = textDecoration,
+                    onCanExpandChange = { descriptionCanExpand = it }
+                )
+            }
 
             if (module.metamodule || module.zygisk) {
                 Row(
@@ -850,11 +1012,17 @@ private fun ModuleItem(
                         )
                     }
                 }
+                module.preinitWarning()?.let {
+                    StatusTag(
+                        stringResource(it),
+                        modifier = Modifier.padding(bottom = 4.dp),
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        backgroundColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                }
             }
 
-            HorizontalDivider(thickness = Dp.Hairline)
-
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -903,7 +1071,7 @@ private fun ModuleItem(
                         if (module.hasWebUi) {
                             CombinedClickableButton(
                                 onClick = {
-                                    onClick()
+                                    onOpenWebUi()
                                     closeSearch()
                                 },
                                 onLongClick = { onAddShortcut(ShortcutType.WebUI) },

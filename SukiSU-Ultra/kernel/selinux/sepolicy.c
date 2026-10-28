@@ -90,8 +90,7 @@ static bool add_typeattribute(struct policydb *db, const char *type,
 #define symtab_insert(s, name, datum) hashtab_insert((s)->table, name, datum)
 #endif
 
-#define avtab_for_each(avtab, cur)                                             \
-    ksu_hash_for_each(avtab.htable, avtab.nslot, cur);
+#define avtab_for_each(avtab, cur) ksu_hash_for_each(avtab.htable, avtab.nslot, cur)
 
 static struct avtab_node *get_avtab_node(struct policydb *db,
                                          struct avtab_key *key,
@@ -131,12 +130,12 @@ static struct avtab_node *get_avtab_node(struct policydb *db,
         /* this is used to get the node - insertion is actually unique */
         node = avtab_insert_nonunique(&db->te_avtab, key, &avdatum);
 
+        // extra size: add_type() can grow policy without updating db->len
         int grow_size = sizeof(struct avtab_key);
         grow_size += sizeof(struct avtab_datum);
         if (key->specified & AVTAB_XPERMS) {
-            grow_size += sizeof(u8);
-            grow_size += sizeof(u8);
-            grow_size += sizeof(u32) * ARRAY_SIZE(avdatum.u.xperms->perms.p);
+            grow_size += sizeof(avdatum.u.xperms->specified) + sizeof(avdatum.u.xperms->driver) +
+                         sizeof(avdatum.u.xperms->perms.p);
         }
         db->len += grow_size;
     }
@@ -344,15 +343,9 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src,
         }
         datum = &node->datum;
 
-        if (datum->u.xperms == NULL) {
-            datum->u.xperms = (struct avtab_extended_perms *)(kzalloc(
-                sizeof(xperms), GFP_KERNEL));
-            if (!datum->u.xperms) {
-                pr_err("alloc xperms failed\n");
-                return;
-            }
-            memcpy(datum->u.xperms, &xperms, sizeof(xperms));
-        }
+        // Allow updating permission bits of existing xperms
+        for (i = 0; i < ARRAY_SIZE(xperms.perms.p); i++)
+            datum->u.xperms->perms.p[i] |= xperms.perms.p[i];
     }
 }
 

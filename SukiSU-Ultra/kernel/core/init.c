@@ -25,8 +25,13 @@
 #include "hook/syscall_hook.h"
 #include "feature/adb_root.h"
 #include "feature/selinux_hide.h"
+#include "feature/avc_spoof.h"
 #include "feature/uts_spoof.h"
+#include "feature/shell_su_adb_only.h"
+#include "feature/module_blacklist.h"
 #include "infra/symbol_resolver.h"
+#include "preinit/preinit.h"
+#include "extension/extension.h"
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs.h>
 #endif
@@ -87,6 +92,11 @@ module_param(allow_shell, bool, 0);
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
+#ifdef MODULE
+bool ksu_bundled = false;
+module_param_named(bundled, ksu_bundled, bool, 0);
+#endif
+
 static char *spoof_release = NULL;
 module_param(spoof_release, charp, 0);
 
@@ -98,6 +108,7 @@ int __init kernelsu_init(void)
 #ifdef CONFIG_KSU_SUSFS
     susfs_init();
 #endif
+    pr_info("welcome to KernelSU version " __stringify(KERNEL_SU_VERSION) ", package name " KSU_PACKAGE_NAME "\n");
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
@@ -152,9 +163,13 @@ int __init kernelsu_init(void)
     ksu_adb_root_init();
     ksu_lsm_hook_init();
     ksu_selinux_hide_init();
+    ksu_avc_spoof_init();
+    ksu_shell_su_adb_only_init();
 
     ksu_supercalls_init();
     ksu_app_profile_init();
+    ksu_extension_init();
+    ksu_extension_register_all();
 
     if (ksu_late_loaded) {
         pr_info("late load mode, skipping kprobe hooks\n");
@@ -170,6 +185,7 @@ int __init kernelsu_init(void)
 
         ksu_allowlist_init();
         ksu_load_allow_list();
+        ksu_dynamic_manager_load();
 
         ksu_syscall_hook_manager_init();
 
@@ -179,6 +195,10 @@ int __init kernelsu_init(void)
 
         ksu_boot_completed = true;
         track_throne(false);
+
+        ksu_avc_spoof_late_init();
+        ksu_feature_apply_forced();
+        ksu_extension_apply_forced();
 
         if (!getenforce()) {
             pr_info("Permissive SELinux, enforcing\n");
@@ -193,6 +213,8 @@ int __init kernelsu_init(void)
         ksu_throne_tracker_init();
 
         ksu_ksud_init();
+
+        ksu_preinit_init();
 
         ksu_file_wrapper_init();
     }
@@ -212,8 +234,10 @@ void __exit kernelsu_exit(void)
 
     ksu_supercalls_exit();
 
-    if (!ksu_late_loaded)
+    if (!ksu_late_loaded) {
         ksu_ksud_exit();
+        ksu_preinit_exit();
+    }
 
     // Wait for any in-flight RCU readers (e.g. handler traversing allow_list)
     synchronize_rcu();
@@ -225,11 +249,15 @@ void __exit kernelsu_exit(void)
 
     ksu_allowlist_exit();
 
+    ksu_shell_su_adb_only_exit();
+    ksu_avc_spoof_exit();
     ksu_selinux_hide_exit();
     ksu_lsm_hook_exit();
     ksu_adb_root_exit();
     ksu_sulog_exit();
     ksu_feature_exit();
+    ksu_module_blacklist_exit();
+    ksu_extension_exit();
 
     put_cred(ksu_cred);
 }
