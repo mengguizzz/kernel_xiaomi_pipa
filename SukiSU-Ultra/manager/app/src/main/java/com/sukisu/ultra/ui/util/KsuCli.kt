@@ -10,12 +10,6 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.system.Os
 import android.util.Log
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
 import com.topjohnwu.superuser.ShellUtils
@@ -24,17 +18,24 @@ import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import com.sukisu.ultra.BuildConfig
 import com.sukisu.ultra.Natives
+import com.sukisu.ultra.R
 import com.sukisu.ultra.core.tasks.BootKernelVersion
 import com.sukisu.ultra.core.tasks.ExtractImage
 import com.sukisu.ultra.core.tasks.ProbeResult
 import com.sukisu.ultra.core.utils.DataSourceChannel
+import com.sukisu.ultra.data.registry.DownloadVerificationException
+import com.sukisu.ultra.data.registry.RegistryDownloadStore
+import com.sukisu.ultra.data.registry.copyForInstall
 import com.sukisu.ultra.ksuApp
-import org.json.JSONArray
+import com.sukisu.ultra.ui.screen.susfs.util.SuSFSConfig
 import okhttp3.OkHttpClient
+import org.json.JSONArray
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
 
 /**
  * @author weishu
@@ -46,7 +47,7 @@ fun getKsuDaemonPath(): String {
     return ksuApp.applicationInfo.nativeLibraryDir + File.separator + "libksud.so"
 }
 
-data class FlashResult(val code: Int, val err: String, val showReboot: Boolean) {
+data class FlashResult(val code: Int, val err: String, val showReboot: Boolean, val outputFile: File? = null) {
     constructor(result: Shell.Result, showReboot: Boolean) : this(result.code, result.err.joinToString("\n"), showReboot)
     constructor(result: Shell.Result) : this(result, result.isSuccess)
 }
@@ -122,12 +123,227 @@ suspend fun getFeatureStatus(feature: String): String = withContext(Dispatchers.
     out.firstOrNull()?.trim().orEmpty()
 }
 
-suspend fun getFeaturePersistValue(feature: String): Long? = withContext(Dispatchers.IO) {
+suspend fun getFeaturePersistValue(feature: String): Long? = readFeatureValue("--config $feature")
+
+// Current value in kernel
+suspend fun getFeatureValue(feature: String): Long? = readFeatureValue(feature)
+
+private suspend fun readFeatureValue(args: String): Long? = withContext(Dispatchers.IO) {
     val shell = getRootShell()
     val out = shell.newJob()
-        .add("${getKsuDaemonPath()} feature get --config $feature").to(ArrayList<String>(), null).exec().out
+        .add("${getKsuDaemonPath()} feature get $args").to(ArrayList<String>(), null).exec().out
     val valueLine = out.firstOrNull { it.trim().startsWith("Value:") } ?: return@withContext null
     valueLine.substringAfter("Value:").trim().toLongOrNull()
+}
+
+// Extension helpers (mirror the feature helpers above). The ksud
+// subcommand is `extension <get|set|check|list|...>`.
+//
+// All probe helpers go through withNewRootShell() rather than the
+// shared KsuCli.SHELL, so callers can fan out concurrently without
+// racing on a single shell's command queue (each shell accepts
+// exactly one command at a time, and libsu's job output is a
+// per-shell buffer).
+
+suspend fun getExtensionStatus(extension: String): String = withContext(Dispatchers.IO) {
+    val out = withNewRootShell {
+        newJob()
+            .add("${getKsuDaemonPath()} extension check $extension")
+            .to(ArrayList<String>(), null)
+            .exec()
+            .out
+    }
+    out.firstOrNull()?.trim().orEmpty()
+}
+
+suspend fun getExtensionPersistValue(extension: String): Long? = readExtensionValue("--config $extension")
+
+suspend fun getExtensionValue(extension: String): Long? = readExtensionValue(extension)
+
+private suspend fun readExtensionValue(args: String): Long? = withContext(Dispatchers.IO) {
+    val out = withNewRootShell {
+        newJob()
+            .add("${getKsuDaemonPath()} extension get $args")
+            .to(ArrayList<String>(), null)
+            .exec()
+            .out
+    }
+    out.firstOrNull { it.trim().startsWith("Value:") }
+        ?.substringAfter("Value:")
+        ?.trim()
+        ?.toLongOrNull()
+}
+
+/**
+ * Pull the state of every extension in a single `ksud extension list`
+ * shell call, then parse the trailing `EXTENSION_LIST_V1 ...` machine
+ * block that the kernel-side CLI prints after the human-readable part.
+ *
+ * ABI 2+ kernels additionally emit `EXTENSION_LIST_V3` rows built from the
+ * kernel's handler table. When those are present they are the whole answer:
+ * they include handlers this build has no [ExtensionId] for, and they carry
+ * every field, so no V1/V2 merge is needed. One shell pays the libksud.so
+ * startup + root handshake + teardown cost once per refresh, and the parse
+ * is linear in the number of extensions.
+ */
+suspend fun getExtensionOverview(): Map<String, ExtensionOverviewEntry> = withContext(Dispatchers.IO) {
+    val out = withNewRootShell {
+        newJob()
+            .add("${getKsuDaemonPath()} extension list")
+            .to(ArrayList<String>(), null)
+            .exec()
+            .out
+    }
+    parseExtensionOverview(out)
+}
+
+/**
+ * Toggle a sticky extension's value through the kernel.
+ *
+ * The numeric id comes from the kernel's own handler table, so this works
+ * for extensions this manager build has no compiled-in id for; ksud
+ * resolves it through KSU_EXTENSION_ENUM before falling back to its static
+ * table. Passing the id (rather than the wire name) also keeps an
+ * unknown extension's name out of the shell command line.
+ */
+suspend fun setExtensionValue(extensionId: Int, value: Long): Result<Unit> = withContext(Dispatchers.IO) {
+    runCatching {
+        val result = withNewRootShell {
+            newJob()
+                .add("${getKsuDaemonPath()} extension set $extensionId $value")
+                .to(ArrayList<String>(), null)
+                .exec()
+        }
+        check(result.isSuccess) {
+            result.err.joinToString("\n").ifBlank { "extension set failed (${result.code})" }
+        }
+    }
+}
+
+/**
+ * One row of the `ksud extension list` machine block. Field names match the
+ * on-wire format exactly.
+ *
+ * The kernel decides what each extension can do and ksud forwards it, so the
+ * capability fields ([sticky], [persistent], [perUid], [needsReboot]) are
+ * read from the output instead of being derived from [ExtensionId]. They stay
+ * at their defaults when the kernel predates extension ABI 1 and only the V1
+ * row is available.
+ */
+data class ExtensionOverviewEntry(
+    val name: String,
+    val id: Int,
+    val supported: Boolean,
+    val forced: Boolean,
+    val value: Long,
+    val managed: Boolean,
+    val sticky: Boolean,
+    /** Extension ABI the kernel speaks; 0 when it predates the probe. */
+    val apiVersion: Int = 0,
+    /** Whether the sticky value is replayed from `.extension_config` at boot. */
+    val persistent: Boolean = false,
+    /** Whether the extension's state is scoped per uid. */
+    val perUid: Boolean = false,
+    /** Whether changes only land after a reboot. */
+    val needsReboot: Boolean = false,
+)
+
+private val EXT_V1_LINE = Regex(
+    """^EXTENSION_LIST_V1\s+name=(\S+)\s+id=(\d+)\s+supported=(\d+)\s+forced=(\d+)\s+value=(\d+)\s+managed=(\d+)\s+sticky=(\d+)\s*$"""
+)
+
+private val EXT_V2_LINE = Regex(
+    """^EXTENSION_LIST_V2\s+name=(\S+)\s+id=(\d+)\s+caps=0x([0-9a-fA-F]+)\s+api=(\d+)\s+sticky=(\d+)\s+persist=(\d+)\s+per_uid=(\d+)\s+reboot=(\d+)\s*$"""
+)
+
+/**
+ * ABI 2+ rows. They enumerate the kernel's handler table, so a V3 row can
+ * exist for an extension this manager has never heard of. Every field is
+ * present, which is why the parser returns the V3 set as-is instead of
+ * merging it with V1/V2.
+ */
+private val EXT_V3_LINE = Regex(
+    """^EXTENSION_LIST_V3\s+name=(\S+)\s+id=(\d+)\s+caps=0x([0-9a-fA-F]+)\s+api=(\d+)\s+supported=(\d+)\s+forced=(\d+)\s+value=(\d+)\s+managed=(\d+)\s+sticky=(\d+)\s+persist=(\d+)\s+per_uid=(\d+)\s+reboot=(\d+)\s*$"""
+)
+
+internal fun parseExtensionOverview(lines: List<String>): Map<String, ExtensionOverviewEntry> {
+    val parsed = LinkedHashMap<String, ExtensionOverviewEntry>()
+    // V2 rows travel separately so V1 keeps its frozen layout for older
+    // consumers. They are merged by wire name once the block is read,
+    // which also makes the parser order-independent.
+    val caps = HashMap<String, ExtensionOverviewEntry>()
+    val enumerated = LinkedHashMap<String, ExtensionOverviewEntry>()
+    for (line in lines) {
+        if (line.startsWith("EXTENSION_LIST_END")) break
+        // A `EXTENSION_LIST_V1 ...` line is the first line of an
+        // extension row; parse it directly. We don't gate on a
+        // separate "entered the block" flag because the very first
+        // V1 line is the one that starts the block.
+        if (line.startsWith("EXTENSION_LIST_V1")) {
+            val m = EXT_V1_LINE.matchEntire(line) ?: continue
+            val entry = ExtensionOverviewEntry(
+                name = m.groupValues[1],
+                id = m.groupValues[2].toIntOrNull() ?: continue,
+                supported = m.groupValues[3] == "1",
+                forced = m.groupValues[4] == "1",
+                value = m.groupValues[5].toLongOrNull() ?: 0L,
+                managed = m.groupValues[6] == "1",
+                sticky = m.groupValues[7] == "1",
+            )
+            parsed[entry.name] = entry
+            continue
+        }
+        if (line.startsWith("EXTENSION_LIST_V2")) {
+            val m = EXT_V2_LINE.matchEntire(line) ?: continue
+            val name = m.groupValues[1]
+            caps[name] = ExtensionOverviewEntry(
+                name = name,
+                id = m.groupValues[2].toIntOrNull() ?: continue,
+                supported = false, // V1 owns these; only the caps fields are read
+                forced = false,
+                value = 0L,
+                managed = false,
+                sticky = m.groupValues[5] == "1",
+                apiVersion = m.groupValues[4].toIntOrNull() ?: 0,
+                persistent = m.groupValues[6] == "1",
+                perUid = m.groupValues[7] == "1",
+                needsReboot = m.groupValues[8] == "1",
+            )
+            continue
+        }
+        if (line.startsWith("EXTENSION_LIST_V3")) {
+            val m = EXT_V3_LINE.matchEntire(line) ?: continue
+            val entry = ExtensionOverviewEntry(
+                name = m.groupValues[1],
+                id = m.groupValues[2].toIntOrNull() ?: continue,
+                supported = m.groupValues[5] == "1",
+                forced = m.groupValues[6] == "1",
+                value = m.groupValues[7].toLongOrNull() ?: 0L,
+                managed = m.groupValues[8] == "1",
+                sticky = m.groupValues[9] == "1",
+                apiVersion = m.groupValues[4].toIntOrNull() ?: 0,
+                persistent = m.groupValues[10] == "1",
+                perUid = m.groupValues[11] == "1",
+                needsReboot = m.groupValues[12] == "1",
+            )
+            enumerated[entry.name] = entry
+            continue
+        }
+    }
+    // V3 is authoritative when present: it includes handlers the static
+    // enum does not know about, and it carries every field itself.
+    if (enumerated.isNotEmpty()) return enumerated
+    if (caps.isEmpty()) return parsed
+    return parsed.mapValues { (name, entry) ->
+        val v2 = caps[name] ?: return@mapValues entry
+        entry.copy(
+            sticky = v2.sticky,
+            apiVersion = v2.apiVersion,
+            persistent = v2.persistent,
+            perUid = v2.perUid,
+            needsReboot = v2.needsReboot,
+        )
+    }
 }
 
 fun install() {
@@ -208,22 +424,69 @@ private fun flashWithIO(
 fun flashModule(
     uri: Uri,
     onStdout: (String) -> Unit,
-    onStderr: (String) -> Unit
+    onStderr: (String) -> Unit,
+    deleteSourceOnSuccess: Boolean = false,
 ): FlashResult {
-    val resolver = ksuApp.contentResolver
-    with(resolver.openInputStream(uri)) {
-        val file = File(ksuApp.cacheDir, "module.zip")
-        file.outputStream().use { output ->
-            this?.copyTo(output)
+    // Registry downloads live in app-private storage and carry their expected size + SHA-256;
+    // the exact copy handed to ksud is re-hashed right before installing.
+    val storeRoot = File(ksuApp.filesDir, RegistryDownloadStore.DIR_NAME)
+    val expected = if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        uri.path?.let { RegistryDownloadStore.expectedFor(storeRoot, File(it)) }
+    } else {
+        null
+    }
+    val file = File.createTempFile("module-", ".zip", ksuApp.cacheDir)
+    try {
+        try {
+            val input = ksuApp.contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri")
+            input.use { copyForInstall(it, file, expected) }
+        } catch (e: IOException) {
+            Log.w("KernelSU", "module $uri not installed: ${e.message}")
+            if (e is DownloadVerificationException) {
+                // Corrupted or tampered after download: never keep it around for a retry.
+                uri.path?.let { RegistryDownloadStore.delete(storeRoot, File(it)) }
+            }
+            val message = "! ${e.message ?: "Failed to read module"}"
+            onStderr(message)
+            return FlashResult(1, message, false)
         }
         val cmd = "module install ${file.absolutePath}"
         val result = flashWithIO("${getKsuDaemonPath()} $cmd", onStdout, onStderr)
         Log.i("KernelSU", "install module $uri result: $result")
-
+        if (shouldDeleteSourceAfterInstall(deleteSourceOnSuccess, result.isSuccess)) {
+            val name = runCatching { uri.getFileName(ksuApp) }.getOrNull()
+                ?: uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+            val deleted = deleteInstalledModuleZip(uri)
+            // The flash screen only renders stdout, so report both outcomes there.
+            onStdout(
+                ksuApp.getString(
+                    if (deleted) R.string.module_zip_deleted else R.string.module_zip_delete_failed,
+                    name,
+                )
+            )
+        }
+        return FlashResult(result, result.isSuccess && moduleNeedsReboot(file))
+    } finally {
         file.delete()
-
-        return FlashResult(result)
     }
+}
+
+private val MODULE_ID_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9._-]+$")
+
+// A hot installed module goes live without leaving the "update" flag behind
+private fun moduleNeedsReboot(zip: File): Boolean {
+    val id = runCatching {
+        ZipFile(zip).use { archive ->
+            val entry = archive.getEntry("module.prop") ?: return@use null
+            archive.getInputStream(entry).bufferedReader().useLines { lines ->
+                lines.map { it.trim() }.firstOrNull { it.startsWith("id=") }?.substringAfter('=')?.trim()
+            }
+        }
+    }.getOrNull()
+    if (id == null || !MODULE_ID_REGEX.matches(id)) return true
+    val dir = "/data/adb/modules/$id"
+    // Any failure to check counts as needing a reboot
+    return !ShellUtils.fastCmdResult(getRootShell(), "[ -d $dir ] && [ ! -e $dir/update ]")
 }
 
 fun runModuleAction(
@@ -249,6 +512,38 @@ fun runModuleAction(
     Log.i("KernelSU", "Module runAction result: $result")
 
     return result.isSuccess
+}
+
+/**
+ * Runs a prepared one-shot script command (see ScriptCommand) in a new root shell in the
+ * global mount namespace, like a module action. Returns the exit code.
+ */
+fun runOneshotScript(
+    command: String, onStdout: (String) -> Unit, onStderr: (String) -> Unit
+): Int {
+    val stdoutCallback: CallbackList<String?> = object : CallbackList<String?>() {
+        override fun onAddElement(s: String?) {
+            onStdout(s ?: "")
+        }
+    }
+
+    val stderrCallback: CallbackList<String?> = object : CallbackList<String?>() {
+        override fun onAddElement(s: String?) {
+            onStderr(s ?: "")
+        }
+    }
+
+    val result = withNewRootShell(true) {
+        newJob().add(command).to(stdoutCallback, stderrCallback).exec()
+    }
+    Log.i(TAG, "one-shot script exit code: ${result.code}")
+    return result.code
+}
+
+/** Removes a script's extraction directory, including files the script created as root. */
+fun removeAsRoot(path: String): Boolean {
+    val escaped = "'" + path.replace("'", "'\\''") + "'"
+    return ShellUtils.fastCmdResult(getRootShell(), "rm -rf $escaped")
 }
 
 fun restoreBoot(
@@ -286,14 +581,42 @@ private fun writeLkmFile(lkm: LkmSelection): File? {
     return file
 }
 
+// A single module name as accepted by ksud's --block-module parser.
+private fun isValidBlockModuleName(name: String): Boolean =
+    name.isNotEmpty() && name.length <= 64 &&
+        name.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' }
+
+/** Parse the comma-separated block-modules field into the non-empty names. */
+fun parseBlockModules(input: String): List<String> =
+    input.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+// The kernel copies the block_modules= value into a 256-byte buffer, leaving
+// 255 bytes; a longer list would be silently truncated, leaving some modules
+// unblocked. Reject it here too.
+private const val MAX_BLOCK_MODULES_LEN = 255
+
+/** Whether every name in the block-modules field is valid (empty is valid). */
+fun isBlockModulesValid(input: String): Boolean {
+    val names = parseBlockModules(input)
+    return names.all(::isValidBlockModuleName) &&
+        names.joinToString(",").length <= MAX_BLOCK_MODULES_LEN
+}
+
 private fun bootPatchFlags(
     allowShell: Boolean,
     enableAdb: Boolean,
     forceBackup: Boolean,
+    blockModules: String,
 ): String = buildString {
     if (allowShell) append(" --allow-shell")
     if (enableAdb) append(" --enable-adbd")
     if (forceBackup) append(" --backup")
+    // Names are validated in the UI before install; pass them through without
+    // mutating. Drop the flag entirely (never inject) if anything slips through.
+    val names = parseBlockModules(blockModules)
+    if (names.isNotEmpty() && names.all(::isValidBlockModuleName)) {
+        append(" --block-module ${names.joinToString(",")}")
+    }
 }
 
 fun installBoot(
@@ -304,11 +627,20 @@ fun installBoot(
     allowShell: Boolean,
     enableAdb: Boolean,
     forceBackup: Boolean,
+    blockModules: String,
     spoofRelease: String,
     spoofVersion: String,
     onStdout: (String) -> Unit,
     onStderr: (String) -> Unit,
+    kpmEnabled: Boolean = false,
+    kpmUndo: Boolean = false,
+    kpmBoot: Uri? = null,
+    outputDir: File? = null,
 ): FlashResult {
+    if (kpmEnabled) return installBootWithKpm(
+        bootUri, lkm, ota, partition, allowShell, enableAdb, forceBackup,
+        blockModules, spoofRelease, spoofVersion, kpmBoot, onStdout, onStderr, kpmUndo,
+    )
     val resolver = ksuApp.contentResolver
 
     val bootFile = bootUri?.let { uri ->
@@ -330,15 +662,10 @@ fun installBoot(
     } else {
         " -b ${bootFile.absolutePath}"
     }
-    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup)
+    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
 
-    if (spoofRelease.isNotBlank()) {
-        cmd += " --spoof-release ${spoofRelease.shellArg()}"
-    }
-
-    if (spoofVersion.isNotBlank()) {
-        cmd += " --spoof-version ${spoofVersion.shellArg()}"
-    }
+    cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
+    cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
 
     if (ota) {
         cmd += " -u"
@@ -354,7 +681,9 @@ fun installBoot(
     if (bootFile != null) {
         val downloadsDir =
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        cmd += " -o $downloadsDir"
+        val destination = outputDir ?: downloadsDir
+        cmd += " -o ${destination.absolutePath.shellArg()}"
+        if (outputDir != null) cmd += " --out-name lkm-patched.img"
     }
 
     partition?.let { part ->
@@ -372,7 +701,90 @@ fun installBoot(
     if (showReboot) { // because we decide do not update ksud when startActivity
         install() // install ksud here
     }
-    return FlashResult(result, showReboot)
+    return FlashResult(result.code, result.err.joinToString("\n"), showReboot,
+        outputDir?.let { File(it, "lkm-patched.img") }?.takeIf { result.isSuccess })
+}
+
+private fun installBootWithKpm(
+    bootUri: Uri?, lkm: LkmSelection, ota: Boolean, partition: String?,
+    allowShell: Boolean, enableAdb: Boolean, forceBackup: Boolean, blockModules: String,
+    spoofRelease: String, spoofVersion: String, kpmBoot: Uri?,
+    onStdout: (String) -> Unit, onStderr: (String) -> Unit,
+    kpmUndo: Boolean,
+): FlashResult {
+    fun failIfNeeded(result: FlashResult): Boolean {
+        if (result.code != 0) onStderr(result.err)
+        return result.code != 0
+    }
+    if (bootUri == null) {
+        if (ota) return FlashResult(1, "Combined KPM installation to the inactive slot is not supported yet; no changes made", false)
+        // Do not discover an invalid manual boot only after updating LKM.
+        if (kpmBoot != null) {
+            try {
+                val header = ByteArray(64)
+                val input = ksuApp.contentResolver.openInputStream(kpmBoot)
+                    ?: error("Cannot open the selected boot.img")
+                input.use { java.io.DataInputStream(it).readFully(header) }
+                check(String(header, 0, 8, Charsets.US_ASCII) == "ANDROID!" &&
+                    ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8) > 0) {
+                    "Select boot.img containing a kernel, not init_boot.img"
+                }
+            } catch (e: Exception) {
+                return FlashResult(1, e.message ?: "Cannot read manual boot.img", false)
+            }
+        }
+        val lkmResult = installBoot(null, lkm, false, partition, allowShell, enableAdb, forceBackup,
+            blockModules, spoofRelease, spoofVersion, onStdout, onStderr, kpmEnabled = false)
+        if (failIfNeeded(lkmResult)) return lkmResult
+        onStdout("- LKM installation completed. Starting additional KPM operation.")
+        if (kpmBoot != null) onStdout("- Manual boot selected: KPM output will be exported, not flashed to the device.")
+        val result = patchKpmBoot(kpmBoot, onStdout, onStderr, undo = kpmUndo)
+        return result.copy(showReboot = result.code == 0 && lkmResult.showReboot)
+    }
+    val work = File.createTempFile("lkm-kpm-", ".dir", ksuApp.cacheDir)
+    check(work.delete() && work.mkdirs()) { "Cannot create combined patch directory" }
+    return try {
+        if (kpmBoot == null) {
+            val header = ByteArray(64)
+            val count = ksuApp.contentResolver.openInputStream(bootUri)?.use { input ->
+                java.io.DataInputStream(input).readFully(header)
+                header.size
+            } ?: 0
+            check(count == header.size && String(header, 0, 8, Charsets.US_ASCII) == "ANDROID!" &&
+                ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt(8) > 0) {
+                "Selected image has no boot kernel. Expand manual boot selection and choose the matching boot.img."
+            }
+        }
+        val lkmResult = installBoot(bootUri, lkm, ota, partition, allowShell, enableAdb, forceBackup,
+            blockModules, spoofRelease, spoofVersion, onStdout, onStderr,
+            kpmEnabled = false, outputDir = work)
+        if (failIfNeeded(lkmResult)) return lkmResult
+        val lkmOutput = lkmResult.outputFile ?: File(work, "lkm-patched.img")
+        check(lkmOutput.isFile) { "LKM patched image was not produced" }
+        check(flashWithIO("chmod 644 ${SuSFSConfig.shellQuote(lkmOutput.absolutePath)}", onStdout, onStderr).isSuccess) {
+            "Cannot read LKM output"
+        }
+        val kpmInput = kpmBoot ?: Uri.fromFile(lkmOutput)
+        val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        check(downloads.exists() || downloads.mkdirs()) { "Cannot create Downloads directory" }
+        val finalOutput = File(downloads, "SukiSU_KPM_boot_${System.currentTimeMillis()}.img")
+        val result = patchKpmBoot(kpmInput, onStdout, onStderr, finalOutput, undo = kpmUndo)
+        if (kpmBoot != null || result.code != 0) {
+            // A separate init_boot/vendor_boot artifact must not disappear
+            // when the temporary directory is cleaned up.
+            val savedLkm = File(downloads, "SukiSU_LKM_${System.currentTimeMillis()}.img")
+            check(flashWithIO("chmod 644 ${SuSFSConfig.shellQuote(lkmOutput.absolutePath)}", onStdout, onStderr).isSuccess) { "Cannot export LKM output" }
+            lkmOutput.copyTo(savedLkm)
+            onStdout("- LKM output: ${savedLkm.absolutePath}")
+        }
+        result
+    } catch (e: Exception) {
+        val message = e.message ?: "Combined LKM/KPM operation failed"
+        onStderr(message)
+        FlashResult(1, message, false)
+    } finally {
+        removeAsRoot(work.absolutePath)
+    }
 }
 
 fun downloadBoot(
@@ -382,13 +794,17 @@ fun downloadBoot(
     allowShell: Boolean,
     enableAdb: Boolean,
     forceBackup: Boolean,
+    blockModules: String,
     spoofRelease: String,
     spoofVersion: String,
     onStdout: (String) -> Unit,
     onStderr: (String) -> Unit,
+    kpmEnabled: Boolean = false,
+    kpmUndo: Boolean = false,
+    kpmBoot: Uri? = null,
 ): FlashResult {
     val bootFile = File(ksuApp.cacheDir, "download-boot.img")
-    var probedKmi: String? = null
+    var probedKmi: String?
     try {
         onStdout("- Downloading and extracting boot image")
         val channel = DataSourceChannel(newDownloadClient(), url)
@@ -397,7 +813,7 @@ fun downloadBoot(
         // Extract the KMI here while the payload is open. ZipFile closes the
         // channel it is built on, so probe on a separate channel.
         val probeChannel = DataSourceChannel(newDownloadClient(), url)
-        probedKmi = try {
+        probedKmi = probeChannel.use { probeChannel ->
             if (magic == "CrAU") {
                 ExtractImage.probePayload(
                     probeChannel,
@@ -411,8 +827,6 @@ fun downloadBoot(
                     onProgress = onStdout,
                 ).kmi
             }
-        } finally {
-            probeChannel.close()
         }
         if (magic == "CrAU") {
             image.consumePayload(channel, partition)
@@ -439,16 +853,38 @@ fun downloadBoot(
         return FlashResult(-1, "Failed to determine KMI from the package", false)
     }
 
+    if (kpmEnabled) {
+        try {
+            var selectedBoot = kpmBoot
+            var downloadedKernelBoot: File? = null
+            if (selectedBoot == null && partition != "boot") {
+                downloadedKernelBoot = File.createTempFile("kpm-remote-boot-", ".img", ksuApp.cacheDir)
+                val kernelChannel = DataSourceChannel(newDownloadClient(), url)
+                val extractor = ExtractImage(downloadedKernelBoot, onStdout)
+                if (readMagic(kernelChannel) == "CrAU") extractor.consumePayload(kernelChannel, "boot")
+                else extractor.consume(kernelChannel, "boot")
+                selectedBoot = Uri.fromFile(downloadedKernelBoot)
+            }
+            try {
+                val resolvedLkm = autoKmi?.let { LkmSelection.KmiString(it) } ?: lkm
+                return installBootWithKpm(Uri.fromFile(bootFile), resolvedLkm, false, partition,
+                    allowShell, enableAdb, forceBackup, blockModules, spoofRelease, spoofVersion,
+                    selectedBoot, onStdout, onStderr, kpmUndo)
+            } finally {
+                downloadedKernelBoot?.delete()
+            }
+        } catch (e: Exception) {
+            return FlashResult(1, e.message ?: "Cannot prepare remote boot for KPM", false)
+        } finally {
+            bootFile.delete()
+        }
+    }
+
     var cmd = "${getKsuDaemonPath()} boot-patch -b ${bootFile.absolutePath}"
-    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup)
+    cmd += bootPatchFlags(allowShell, enableAdb, forceBackup, blockModules)
 
-    if (spoofRelease.isNotBlank()) {
-        cmd += " --spoof-release ${spoofRelease.shellArg()}"
-    }
-
-    if (spoofVersion.isNotBlank()) {
-        cmd += " --spoof-version ${spoofVersion.shellArg()}"
-    }
+    cmd += " --spoof-release ${spoofRelease.trim().shellArg()}"
+    cmd += " --spoof-version ${spoofVersion.trim().shellArg()}"
 
     val lkmFile = writeLkmFile(lkm)
     if (lkmFile != null) {
@@ -516,7 +952,7 @@ private fun String.shellArg(): String = "'${replace("'", "'\\''")}'"
 
 fun reboot(reason: String = "") {
     if (reason == "soft_reboot") {
-        execKsud("soft-reboot", true, true)
+        execKsud("soft-reboot", true, globalMnt = true)
         return
     }
     val shell = getRootShell()
@@ -576,6 +1012,26 @@ suspend fun getAvailablePartitions(): List<String> = withContext(Dispatchers.IO)
     val cmd = "boot-info available-partitions"
     val out = shell.newJob().add("${getKsuDaemonPath()} $cmd").to(ArrayList(), null).exec().out
     out.filter { it.isNotBlank() }.map { it.trim() }
+}
+
+// Known vendor anti-root kernel modules that `--block-module` is meant for.
+internal val KNOWN_BLOCKABLE_MODULES = listOf(
+    "vr", "vklp", "oplus_secure_guard", "oplus_secure_guard_new", "mkp"
+)
+
+// Return the known anti-root modules currently loaded on this device (per
+// /proc/modules), so the install screen can pre-fill only the relevant ones.
+// Modules other modules use are left out: blocking one keeps its users from
+// loading as well, so ksuinit refuses to block it in first stage anyway.
+suspend fun getLoadedBlockableModules(): List<String> = withContext(Dispatchers.IO) {
+    val shell = getRootShell()
+    val out = shell.newJob().add("cat /proc/modules").to(ArrayList(), null).exec().out
+    // <name> <size> <refcount> <used by, or "-"> <state> <address>
+    val unused = out.mapNotNull { line ->
+        val fields = line.trim().split(Regex("\\s+"))
+        fields.getOrNull(0)?.takeIf { fields.getOrNull(3) == "-" }
+    }.toHashSet()
+    KNOWN_BLOCKABLE_MODULES.filter { it in unused }
 }
 
 fun hasMagisk(): Boolean {
@@ -662,15 +1118,19 @@ fun restartApp(packageName: String, userId: Int? = null) {
 }
 
 // KPM控制
+// KPM module names may contain spaces ("ABC EFG"): always pass names, paths and
+// args through shellQuote, otherwise the shell splits them into multiple argv and
+// ksud (clap) only takes the first token, so info/unload/control hit the wrong
+// module or fail.
 fun loadKpmModule(path: String, args: String? = null): Boolean {
     val shell = getRootShell()
-    val cmd = "${getKsuDaemonPath()} kpm load $path ${args ?: ""}"
+    val cmd = "${getKsuDaemonPath()} kpm load ${SuSFSConfig.shellQuote(path)} ${SuSFSConfig.shellQuote(args ?: "")}"
     return ShellUtils.fastCmdResult(shell, cmd)
 }
 
 fun unloadKpmModule(name: String): Boolean {
     val shell = getRootShell()
-    val cmd = "${getKsuDaemonPath()} kpm unload $name"
+    val cmd = "${getKsuDaemonPath()} kpm unload ${SuSFSConfig.shellQuote(name)}"
     return ShellUtils.fastCmdResult(shell, cmd)
 }
 
@@ -710,19 +1170,24 @@ suspend fun streamFile(path: String): List<String> = withContext(Dispatchers.IO)
 }
 
 fun listKpmModules(): String {
-    val shell = getRootShell()
-    val cmd = "${getKsuDaemonPath()} kpm list"
-    return try {
-        runCmd(shell, cmd).trim()
-    } catch (e: Exception) {
-        Log.e(TAG, "Failed to list KPM modules", e)
-        ""
+    return listKpmModules(getRootShell().newJob().add("${getKsuDaemonPath()} kpm list"))
+}
+
+internal fun listKpmModules(job: Shell.Job): String {
+    val result = job.to(ArrayList(), ArrayList()).exec()
+    check(result.isSuccess) {
+        result.err.joinToString("\n").ifBlank { "KPM list failed (${result.code})" }
     }
+    // ksud can report a kernel error on stdout while exiting successfully.
+    check(result.out.none { it.trimStart().startsWith("Failed to get kpm list:") }) {
+        result.out.joinToString("\n")
+    }
+    return result.out.joinToString("\n").trim()
 }
 
 fun getKpmModuleInfo(name: String): String {
     val shell = getRootShell()
-    val cmd = "${getKsuDaemonPath()} kpm info $name"
+    val cmd = "${getKsuDaemonPath()} kpm info ${SuSFSConfig.shellQuote(name)}"
     return try {
         runCmd(shell, cmd).trim()
     } catch (e: Exception) {
@@ -733,7 +1198,7 @@ fun getKpmModuleInfo(name: String): String {
 
 fun controlKpmModule(name: String, args: String? = null): Int {
     val shell = getRootShell()
-    val cmd = """${getKsuDaemonPath()} kpm control $name "${args ?: ""}""""
+    val cmd = "${getKsuDaemonPath()} kpm control ${SuSFSConfig.shellQuote(name)} ${SuSFSConfig.shellQuote(args ?: "")}"
     val result = runCmd(shell, cmd)
     return result.trim().toIntOrNull() ?: -1
 }
@@ -754,6 +1219,16 @@ fun getSuSFSVersion(): String {
     val shell = getRootShell()
     val result = ShellUtils.fastCmd(shell, "${getKsuDaemonPath()} susfs version")
     return result
+}
+
+fun getSuSFSVariant(): String {
+    val shell = getRootShell()
+    return ShellUtils.fastCmd(shell, "${getKsuDaemonPath()} susfs variant").trim()
+}
+
+fun getSuSFSImplementation(): String {
+    val shell = getRootShell()
+    return ShellUtils.fastCmd(shell, "${getKsuDaemonPath()} susfs implementation").trim()
 }
 
 fun getSuSFSFeatures(): String {
@@ -846,20 +1321,6 @@ fun applyUmountConfigToKernel(): Boolean {
     return result
 }
 
-// 检查 KPM 版本是否可用
-@Composable
-fun rememberKpmAvailable(): Boolean {
-    var cachedVersion by rememberSaveable { mutableStateOf("") }
-    val kpmVersion by produceState(initialValue = cachedVersion) {
-        val result = withContext(Dispatchers.IO) {
-            runCatching { getKpmVersion() }.getOrElse { "" }
-        }
-        cachedVersion = result
-        value = result
-    }
-    return kpmVersion.isNotEmpty() && !kpmVersion.contains("Error", ignoreCase = true)
-}
-
 data class BootConfig(
     val allowShell: Boolean = false,
     val spoofRelease: String = "",
@@ -893,11 +1354,80 @@ suspend fun getBootConfig(): BootConfig = withContext(Dispatchers.IO) {
 
 private fun parseQuotedValue(value: String): String {
     val trimmed = value.trim()
-    return if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-        trimmed.substring(1, trimmed.length - 1)
-    } else if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
-        trimmed.substring(1, trimmed.length - 1)
-    } else {
-        trimmed
+    val inner = when {
+        trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"") ->
+            trimmed.substring(1, trimmed.length - 1)
+        trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'") ->
+            trimmed.substring(1, trimmed.length - 1)
+        else -> trimmed
     }
+    // ksud boot-patch escapes '"' and '\' inside quoted values; undo it here
+    if ('\\' !in inner) return inner
+    val sb = StringBuilder(inner.length)
+    var i = 0
+    while (i < inner.length) {
+        val c = inner[i]
+        if (c == '\\' && i + 1 < inner.length && (inner[i + 1] == '"' || inner[i + 1] == '\\')) {
+            sb.append(inner[i + 1])
+            i += 2
+        } else {
+            sb.append(c)
+            i += 1
+        }
+    }
+    return sb.toString()
+}
+
+data class DynamicManagerEntry(val packageName: String, val certSize: Int, val hash: String, val uid: Int)
+data class DynamicManagerState(val enabled: Boolean, val entries: List<DynamicManagerEntry>)
+data class DynamicManagerSignature(val certSize: Int, val hash: String)
+
+private suspend fun runDynamicManagerCommand(vararg args: String): String = withContext(Dispatchers.IO) {
+    val command = "${getKsuDaemonPath()} " + args.joinToString(" ") { it.ksudShellArg() }
+    val output = runCmd(getRootShell(), "$command; printf '\\n__KSUD_EXIT_CODE__:%s' $? ")
+    val marker = Regex("\\n__KSUD_EXIT_CODE__:(\\d+)$").find(output)
+        ?: error("ksud command did not return an exit status")
+    check(marker.groupValues[1] == "0") { output.substringBefore(marker.value).ifBlank { "ksud command failed" } }
+    output.substringBefore(marker.value)
+}
+
+private fun String.ksudShellArg(): String = "'${replace("'", "'\\''")}'"
+
+suspend fun getDynamicManagers(): DynamicManagerState {
+    val lines = runDynamicManagerCommand("manager", "list").lines()
+    val enabled = lines.firstOrNull { it.startsWith("enabled:") }
+        ?.substringAfter(':')?.trim()?.toBooleanStrictOrNull() ?: false
+    val entries = lines.drop(1).filter { it.isNotBlank() }.mapNotNull { line ->
+        val fields = line.split('\t')
+        if (fields.size < 4) return@mapNotNull null
+        DynamicManagerEntry(
+            packageName = fields[0],
+            certSize = fields[1].toIntOrNull() ?: return@mapNotNull null,
+            hash = fields[2],
+            uid = fields[3].toIntOrNull() ?: return@mapNotNull null,
+        )
+    }
+    return DynamicManagerState(enabled, entries)
+}
+
+suspend fun setDynamicManagersEnabled(enabled: Boolean) {
+    runDynamicManagerCommand("manager", "set-enabled", enabled.toString())
+}
+
+suspend fun removeDynamicManager(packageName: String) {
+    runDynamicManagerCommand("manager", "remove", packageName)
+}
+
+suspend fun getDynamicManagerSignature(apkPath: String): DynamicManagerSignature {
+    val output = runDynamicManagerCommand("debug", "get-sign", apkPath)
+    val size = Regex("size:\\s*(0x[0-9a-fA-F]+|[0-9]+)").find(output)?.groupValues?.get(1)
+        ?: error("Could not parse signature size")
+    val certSize = if (size.startsWith("0x")) size.substring(2).toLong(16).toInt() else size.toInt()
+    val hash = Regex("hash:\\s*([0-9a-fA-F]{64})").find(output)?.groupValues?.get(1)
+        ?: error("Could not parse signature hash")
+    return DynamicManagerSignature(certSize, hash)
+}
+
+suspend fun addDynamicManager(packageName: String, signature: DynamicManagerSignature) {
+    runDynamicManagerCommand("manager", "add", packageName, signature.certSize.toString(), signature.hash)
 }

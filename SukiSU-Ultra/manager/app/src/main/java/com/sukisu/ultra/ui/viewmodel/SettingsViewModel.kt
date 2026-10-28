@@ -25,7 +25,11 @@ class SettingsViewModel(
     private val repo: SettingsRepository = SettingsRepositoryImpl()
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(SettingsUiState())
+    private val _uiState = MutableStateFlow(SettingsUiState(
+        checkUpdate = repo.checkUpdate,
+        checkCiUpdate = repo.checkCiUpdate,
+        checkModuleUpdate = repo.checkModuleUpdate,
+    ))
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     init {
@@ -34,20 +38,23 @@ class SettingsViewModel(
 
     fun refresh() {
         viewModelScope.launch {
-            val checkUpdate = repo.checkUpdate
-            val checkModuleUpdate = repo.checkModuleUpdate
             val alternativeIcon = repo.alternativeIcon
             val themeMode = repo.themeMode
             val miuixMonet = repo.miuixMonet
             val keyColor = repo.keyColor
             val enablePredictiveBack = repo.enablePredictiveBack
+            val enableSwipeDismiss = repo.enableSwipeDismiss
+            val pagerInterceptionMode = repo.pagerInterceptionMode
             val enableBlur = repo.enableBlur
             val enableFloatingBottomBar = repo.enableFloatingBottomBar
             val enableFloatingBottomBarBlur = repo.enableFloatingBottomBarBlur
             val enableNavigationBadge = repo.enableNavigationBadge
             val pageScale = repo.pageScale
+            val moduleDescriptionMaxLines = repo.moduleDescriptionMaxLines
             val enableWebDebugging = repo.enableWebDebugging
+            val autoDeleteModuleZip = repo.autoDeleteModuleZip
             val showFullStatus = repo.showFullStatus
+            val hideHomeWarnings = repo.hideHomeWarnings
             val colorStyle = repo.colorStyle
             val colorSpec = repo.colorSpec
             val isLkmMode = repo.isLkmMode()
@@ -57,16 +64,40 @@ class SettingsViewModel(
             val suCompatPersistValue = repo.getSuCompatPersistValue()
             val isSuEnabled = repo.isSuEnabled()
 
-            val suCompatMode = if (suCompatPersistValue == 0L) 2 else if (!isSuEnabled) 1 else 0
+            // Forced features show the value in effect, the persisted one is ignored
+            val suCompatMode = when {
+                suCompatStatus == "forced" -> if (isSuEnabled) 0 else 2
+                suCompatPersistValue == 0L -> 2
+                !isSuEnabled -> 1
+                else -> 0
+            }
 
             val kernelUmountStatus = repo.getKernelUmountStatus()
             val isKernelUmountEnabled = repo.isKernelUmountEnabled()
             val selinuxHideStatus = repo.getSelinuxHideStatus()
             val isSelinuxHideEnabled = repo.isSelinuxHideEnabled()
+            val avcSpoofStatus = repo.getAvcSpoofStatus()
+            val isAvcSpoofEnabled = repo.isAvcSpoofEnabled()
+            val mountHideStatus = repo.getMountHideStatus()
+            val isMountHideEnabled = repo.isMountHideEnabled()
             val sulogStatus = repo.getSulogStatus()
-            val isSulogEnabled = repo.getSulogPersistValue() == 1L
+            val isSulogEnabled = if (sulogStatus == "forced") {
+                repo.getSulogValue() == 1L
+            } else {
+                repo.getSulogPersistValue() == 1L
+            }
             val adbRootStatus = repo.getAdbRootStatus()
-            val isAdbRootEnabled = repo.getAdbRootPersistValue() == 1L
+            val isAdbRootEnabled = if (adbRootStatus == "forced") {
+                repo.getAdbRootValue() == 1L
+            } else {
+                repo.getAdbRootPersistValue() == 1L
+            }
+            val shellSuAdbOnlyStatus = repo.getShellSuAdbOnlyStatus()
+            val isShellSuAdbOnlyEnabled = if (shellSuAdbOnlyStatus == "forced") {
+                repo.getShellSuAdbOnlyValue() == 1L
+            } else {
+                repo.getShellSuAdbOnlyPersistValue() == 1L
+            }
             val isDefaultUmountModules = repo.isDefaultUmountModules()
             val uiMode = repo.uiMode
             val appLanguage = repo.appLanguage
@@ -78,20 +109,26 @@ class SettingsViewModel(
                 it.copy(
                     uiMode = uiMode,
                     appLanguage = appLanguage,
-                    checkUpdate = checkUpdate,
-                    checkModuleUpdate = checkModuleUpdate,
+                    checkUpdate = repo.checkUpdate,
+                    checkCiUpdate = repo.checkCiUpdate,
+                    checkModuleUpdate = repo.checkModuleUpdate,
                     alternativeIcon = alternativeIcon,
                     themeMode = themeMode,
                     miuixMonet = miuixMonet,
                     keyColor = keyColor,
                     enablePredictiveBack = enablePredictiveBack,
+                    enableSwipeDismiss = enableSwipeDismiss,
+                    pagerInterceptionMode = pagerInterceptionMode,
                     enableBlur = enableBlur,
                     enableFloatingBottomBar = enableFloatingBottomBar,
                     enableFloatingBottomBarBlur = enableFloatingBottomBarBlur,
                     enableNavigationBadge = enableNavigationBadge,
                     pageScale = pageScale,
+                    moduleDescriptionMaxLines = moduleDescriptionMaxLines,
                     enableWebDebugging = enableWebDebugging,
+                    autoDeleteModuleZip = autoDeleteModuleZip,
                     showFullStatus = showFullStatus,
+                    hideHomeWarnings = hideHomeWarnings,
                     colorStyle = colorStyle,
                     colorSpec = colorSpec,
                     suCompatStatus = suCompatStatus,
@@ -99,10 +136,16 @@ class SettingsViewModel(
                     isSuEnabled = isSuEnabled,
                     adbRootStatus = adbRootStatus,
                     isAdbRootEnabled = isAdbRootEnabled,
+                    shellSuAdbOnlyStatus = shellSuAdbOnlyStatus,
+                    isShellSuAdbOnlyEnabled = isShellSuAdbOnlyEnabled,
                     kernelUmountStatus = kernelUmountStatus,
                     isKernelUmountEnabled = isKernelUmountEnabled,
                     selinuxHideStatus = selinuxHideStatus,
                     isSelinuxHideEnabled = isSelinuxHideEnabled,
+                    avcSpoofStatus = avcSpoofStatus,
+                    isAvcSpoofEnabled = isAvcSpoofEnabled,
+                    mountHideStatus = mountHideStatus,
+                    isMountHideEnabled = isMountHideEnabled,
                     sulogStatus = sulogStatus,
                     isSulogEnabled = isSulogEnabled,
                     isDefaultUmountModules = isDefaultUmountModules,
@@ -113,6 +156,11 @@ class SettingsViewModel(
                 )
             }
         }
+    }
+
+    fun setCheckCiUpdate(enabled: Boolean) {
+        repo.checkCiUpdate = enabled
+        _uiState.update { it.copy(checkCiUpdate = enabled) }
     }
 
     fun setCheckUpdate(enabled: Boolean) {
@@ -162,6 +210,11 @@ class SettingsViewModel(
     fun setCheckModuleUpdate(enabled: Boolean) {
         repo.checkModuleUpdate = enabled
         _uiState.update { it.copy(checkModuleUpdate = enabled) }
+    }
+
+    fun setAutoDeleteModuleZip(enabled: Boolean) {
+        repo.autoDeleteModuleZip = enabled
+        _uiState.update { it.copy(autoDeleteModuleZip = enabled) }
     }
     fun setAlternativeIcon(context: Context, enabled: Boolean) {
         repo.alternativeIcon = enabled
@@ -218,6 +271,16 @@ class SettingsViewModel(
         _uiState.update { it.copy(enablePredictiveBack = enabled) }
     }
 
+    fun setEnableSwipeDismiss(enabled: Boolean) {
+        repo.enableSwipeDismiss = enabled
+        _uiState.update { it.copy(enableSwipeDismiss = enabled) }
+    }
+
+    fun setPagerInterceptionMode(mode: Int) {
+        repo.pagerInterceptionMode = mode
+        _uiState.update { it.copy(pagerInterceptionMode = mode.coerceIn(0, 2)) }
+    }
+
     fun setEnableBlur(enabled: Boolean) {
         repo.enableBlur = enabled
         _uiState.update { it.copy(enableBlur = enabled) }
@@ -243,6 +306,11 @@ class SettingsViewModel(
         _uiState.update { it.copy(pageScale = scale) }
     }
 
+    fun setModuleDescriptionMaxLines(lines: Int) {
+        repo.moduleDescriptionMaxLines = lines
+        _uiState.update { it.copy(moduleDescriptionMaxLines = lines) }
+    }
+
     fun setEnableWebDebugging(enabled: Boolean) {
         repo.enableWebDebugging = enabled
         _uiState.update { it.copy(enableWebDebugging = enabled) }
@@ -251,6 +319,11 @@ class SettingsViewModel(
     fun setShowFullStatus(enabled: Boolean) {
         repo.showFullStatus = enabled
         _uiState.update { it.copy(showFullStatus = enabled) }
+    }
+
+    fun setHideHomeWarnings(enabled: Boolean) {
+        repo.hideHomeWarnings = enabled
+        _uiState.update { it.copy(hideHomeWarnings = enabled) }
     }
 
     fun setSuCompatMode(mode: Int) {
@@ -313,6 +386,29 @@ class SettingsViewModel(
         }
     }
 
+    fun setMountHideEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val status = repo.setMountHideEnabled(enabled)
+            repo.execKsudFeatureSave()
+            _uiState.update { it.copy(isMountHideEnabled = enabled) }
+            when (status) {
+                0 -> {}
+                -OsConstants.EAGAIN -> {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(ksuApp, R.string.settings_mount_hide_reboot_required,
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
+                else -> {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(ksuApp, ksuApp.getString(R.string.settings_mount_hide_failed, status),
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
     fun setAutoJailbreak(enabled: Boolean) {
         repo.autoJailbreak = enabled
         _uiState.update { it.copy(autoJailbreak = enabled) }
@@ -332,6 +428,15 @@ class SettingsViewModel(
         }
     }
 
+    fun setShellSuAdbOnlyEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (repo.setShellSuAdbOnlyEnabled(enabled)) {
+                repo.execKsudFeatureSave()
+                _uiState.update { it.copy(isShellSuAdbOnlyEnabled = enabled) }
+            }
+        }
+    }
+
     fun setAdbRootEnabled(enabled: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             if (repo.setAdbRootEnabled(enabled)) {
@@ -345,6 +450,19 @@ class SettingsViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             if (repo.setDefaultUmountModules(enabled)) {
                 _uiState.update { it.copy(isDefaultUmountModules = enabled) }
+            }
+        }
+    }
+
+    fun setAvcSpoofEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (repo.setAvcSpoofEnabled(enabled)) {
+                repo.execKsudFeatureSave()
+                _uiState.update { it.copy(isAvcSpoofEnabled = repo.isAvcSpoofEnabled()) }
+            } else {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(ksuApp, R.string.settings_avc_spoof_failed, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

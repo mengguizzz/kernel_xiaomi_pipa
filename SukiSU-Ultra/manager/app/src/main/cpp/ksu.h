@@ -24,6 +24,8 @@ bool is_safe_mode();
 
 bool is_lkm_mode();
 
+bool is_lkm_bundled();
+
 bool is_late_load_mode();
 
 bool is_manager();
@@ -50,6 +52,29 @@ bool is_kernel_umount_enabled();
 int set_selinux_hide_enabled(bool enabled);
 
 bool is_selinux_hide_enabled();
+
+// Mount hide
+int set_mount_hide_enabled(bool enabled);
+
+bool is_mount_hide_enabled();
+
+// AVC log spoof
+int set_avc_spoof_enabled(bool enabled);
+bool is_avc_spoof_enabled();
+
+// CPU spoof SET-MIDR io passthrough (kept struct layout from
+// uapi/supercall.h::ksu_set_spoof_cpu_cmd).
+int ksu_set_spoof_cpu(const struct ksu_set_spoof_cpu_cmd *cmd);
+
+// KSU_EXTENSION_UMOUNT_PATHS
+int umount_paths_wipe();
+int umount_paths_add(const char *path, uint32_t flags);
+int umount_paths_delete(const char *path);
+int umount_paths_list(char *buffer, uint32_t buf_size);
+
+// KSU_EXTENSION_DYNAMIC_MANAGER
+int dynamic_manager_get(struct ksu_manager_cmd *cmd);
+int dynamic_manager_set(struct ksu_manager_cmd *cmd);
 
 bool get_allow_list(struct ksu_new_get_allow_list_cmd *);
 

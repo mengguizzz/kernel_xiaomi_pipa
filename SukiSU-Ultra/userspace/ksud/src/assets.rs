@@ -14,13 +14,18 @@ mod android {
 
     pub fn ensure_binaries(ignore_if_exist: bool) -> anyhow::Result<()> {
         for file in Asset::iter() {
-            if file == "ksuinit" || file.ends_with(".ko") {
-                // don't extract ksuinit and kernel modules
+            if file == "ksuinit" || file == "waitsys" || file.ends_with(".ko") {
+                // don't extract internal executables and kernel modules
+                continue;
+            }
+            let path = std::path::PathBuf::from(format!("{BINARY_DIR}{file}"));
+            // Match ensure_binary's exists semantics before fetching/decompressing the asset.
+            if ignore_if_exist && path.exists() {
                 continue;
             }
             let asset =
                 Asset::get(&file).ok_or_else(|| anyhow::anyhow!("asset not found: {file}"))?;
-            ensure_binary(format!("{BINARY_DIR}{file}"), &asset.data, ignore_if_exist)?;
+            ensure_binary(path, &asset.data, ignore_if_exist)?;
         }
 
         // Create resetprop -> ksud symlink (resetprop is now built into ksud)
@@ -48,6 +53,11 @@ struct Asset;
 #[cfg(all(target_arch = "x86_64", target_os = "android"))]
 #[derive(RustEmbed)]
 #[folder = "bin/x86_64"]
+struct Asset;
+
+#[cfg(all(target_arch = "riscv64", target_os = "android"))]
+#[derive(RustEmbed)]
+#[folder = "bin/riscv64"]
 struct Asset;
 
 // If not Android, ie. macos, linux, windows, include both

@@ -1,8 +1,12 @@
 package com.sukisu.ultra.ui.util
 
 import android.net.Uri
+import android.os.Build
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.withContext
+import com.sukisu.ultra.data.registry.ExpectedFile
 import com.sukisu.ultra.ksuApp
 import com.sukisu.ultra.ui.util.module.LatestVersionInfo
 import okhttp3.Request
@@ -16,7 +20,9 @@ suspend fun download(
     fileName: String,
     onDownloaded: (Uri) -> Unit = {},
     onDownloading: () -> Unit = {},
-    onProgress: (Int) -> Unit = {}
+    onProgress: (Int) -> Unit = {},
+    expected: ExpectedFile? = null,
+    onFailed: (DownloadManager.DownloadState) -> Unit = {},
 ) {
     onDownloading()
 
@@ -25,54 +31,81 @@ suspend fun download(
         url = url,
         fileName = fileName,
         onCompleted = onDownloaded,
+        expected = expected,
     )
 
-    DownloadManager.downloads
+    val finalState = DownloadManager.downloads
         .onEach { map -> map[downloadId]?.let { onProgress(it.progress) } }
         .first { map ->
             val status = map[downloadId]?.status
             status == DownloadManager.Status.COMPLETED ||
                 status == DownloadManager.Status.FAILED
-        }
+        }[downloadId]
+    if (finalState?.status == DownloadManager.Status.FAILED) {
+        withContext(Dispatchers.Main) { onFailed(finalState) }
+    }
 }
 
-fun checkNewVersion(): LatestVersionInfo {
-    if (!isNetworkAvailable(ksuApp)) return LatestVersionInfo()
-    val url = "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest"
-    // default null value if failed
-    val defaultValue = LatestVersionInfo()
+internal suspend fun isDownloadAvailable(uri: Uri): Boolean = withContext(Dispatchers.IO) {
     runCatching {
-        ksuApp.okhttpClient.newCall(Request.Builder().url(url).build()).execute()
-            .use { response ->
-                if (!response.isSuccessful) {
-                    return defaultValue
-                }
-                val body = response.body.string()
-                val json = org.json.JSONObject(body)
-                val changelog = json.optString("body")
+        ksuApp.contentResolver.openFileDescriptor(uri, "r").use { it != null }
+    }.getOrDefault(false)
+}
 
-                val assets = json.getJSONArray("assets")
-                for (i in 0 until assets.length()) {
-                    val asset = assets.getJSONObject(i)
-                    val name = asset.getString("name")
-                    if (!name.endsWith(".apk")) {
-                        continue
+
+fun checkNewVersion(): LatestVersionInfo = checkReleaseVersion("latest", isCi = false)
+
+fun checkNewCiVersion(): LatestVersionInfo = checkReleaseVersion("tags/manager-ci", isCi = true)
+
+private fun checkReleaseVersion(endpoint: String, isCi: Boolean): LatestVersionInfo {
+    if (!isNetworkAvailable(ksuApp)) return LatestVersionInfo()
+    val url = "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/$endpoint"
+    return runCatching {
+        ksuApp.okhttpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            if (!response.isSuccessful) {
+                android.util.Log.w("UpdateCheck", "$endpoint: HTTP ${response.code}")
+                return LatestVersionInfo()
+            }
+            val json = org.json.JSONObject(response.body.string())
+            val assets = json.getJSONArray("assets")
+            val changelog = json.optString("body")
+            if (isCi) {
+                val versionCode = Regex("""\((\d+)\)""").find(json.optString("name"))
+                    ?.groupValues?.get(1)?.toLongOrNull() ?: return LatestVersionInfo()
+                val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return LatestVersionInfo()
+                val apkPattern = Regex(
+                    """^SukiSU_.+_${versionCode}-${Regex.escape(abi)}-release\.apk$"""
+                )
+                val apk = (0 until assets.length()).asSequence()
+                    .mapNotNull { assets.optJSONObject(it) }
+                    .firstOrNull { apkPattern.matches(it.optString("name")) }
+                    ?: run {
+                        android.util.Log.w("UpdateCheck", "CI: no APK for version=$versionCode, abi=$abi")
+                        return LatestVersionInfo()
                     }
-
-                    val regex = Regex("v(.+?)_(\\d+)-")
-                    val matchResult = regex.find(name) ?: continue
-                    matchResult.groupValues[1]
-                    val versionCode = matchResult.groupValues[2].toLong()
-                    val downloadUrl = asset.getString("browser_download_url")
-
+                val downloadUrl = apk.optString("browser_download_url")
+                    .takeIf { it.startsWith("https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/manager-ci/") }
+                    ?: return LatestVersionInfo()
+                return LatestVersionInfo(versionCode, downloadUrl, changelog)
+            }
+            val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return LatestVersionInfo()
+            val archPattern = Regex("""^SukiSU_v(.+?)_(\d+)-${Regex.escape(abi)}-release\.apk$""")
+            val universalPattern = Regex("""^SukiSU_v(.+?)_(\d+)-release\.apk$""")
+            val apkAssets = (0 until assets.length()).map { assets.getJSONObject(it) }
+            // Prefer the device-specific asset, falling back to an actual universal APK only.
+            for (pattern in listOf(archPattern, universalPattern)) {
+                for (asset in apkAssets) {
+                    val match = pattern.matchEntire(asset.getString("name")) ?: continue
                     return LatestVersionInfo(
-                        versionCode,
-                        downloadUrl,
-                        changelog
+                        match.groupValues[2].toLong(),
+                        asset.getString("browser_download_url"),
+                        changelog,
                     )
                 }
-
             }
-    }
-    return defaultValue
+            LatestVersionInfo()
+        }
+    }.onFailure {
+        android.util.Log.w("UpdateCheck", "$endpoint: update check failed", it)
+    }.getOrDefault(LatestVersionInfo())
 }

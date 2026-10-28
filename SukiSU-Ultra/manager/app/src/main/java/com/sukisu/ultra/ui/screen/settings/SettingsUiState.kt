@@ -10,7 +10,9 @@ data class SettingsUiState(
     val uiMode: String = UiMode.DEFAULT_VALUE,
     val appLanguage: String = "",
     val checkUpdate: Boolean = true,
+    val checkCiUpdate: Boolean = false,
     val checkModuleUpdate: Boolean = true,
+    val autoDeleteModuleZip: Boolean = false,
     val alternativeIcon : Boolean = false,
     val themeMode: Int = 0,
     val miuixMonet: Boolean = false,
@@ -18,13 +20,17 @@ data class SettingsUiState(
     val colorStyle: String = PaletteStyle.TonalSpot.name,
     val colorSpec: String = ColorSpec.SpecVersion.SPEC_2025.name,
     val enablePredictiveBack: Boolean = false,
+    val enableSwipeDismiss: Boolean = true,
+    val pagerInterceptionMode: Int = 1,
     val enableBlur: Boolean = true,
     val enableFloatingBottomBar: Boolean = false,
     val enableFloatingBottomBarBlur: Boolean = false,
     val enableNavigationBadge: Boolean = true,
     val pageScale: Float = 1.0f,
+    val moduleDescriptionMaxLines: Int = 4,
     val enableWebDebugging: Boolean = false,
     val showFullStatus: Boolean = true,
+    val hideHomeWarnings: Boolean = false,
 
     // Su Compat
     val suCompatStatus: String = "",
@@ -39,6 +45,14 @@ data class SettingsUiState(
     val selinuxHideStatus: String = "",
     val isSelinuxHideEnabled: Boolean = false,
 
+    // AVC log spoofing
+    val avcSpoofStatus: String = "",
+    val isAvcSpoofEnabled: Boolean = false,
+
+    // Mount Hide
+    val mountHideStatus: String = "",
+    val isMountHideEnabled: Boolean = false,
+
     // SU Log
     val sulogStatus: String = "",
     val isSulogEnabled: Boolean = false,
@@ -49,6 +63,10 @@ data class SettingsUiState(
     // ADB Root
     val adbRootStatus: String = "",
     val isAdbRootEnabled: Boolean = false,
+
+    // Shell SU ADB Only
+    val shellSuAdbOnlyStatus: String = "",
+    val isShellSuAdbOnlyEnabled: Boolean = false,
 
     val isLkmMode: Boolean = false,
     val isLateLoadMode: Boolean = false,
@@ -63,7 +81,9 @@ data class SettingsUiState(
 @Immutable
 data class SettingsScreenActions(
     val onSetCheckUpdate: (Boolean) -> Unit,
+    val onSetCheckCiUpdate: (Boolean) -> Unit,
     val onSetCheckModuleUpdate: (Boolean) -> Unit,
+    val onSetAutoDeleteModuleZip: (Boolean) -> Unit,
     val onOpenTheme: () -> Unit,
     val onSetUiModeIndex: (Int) -> Unit,
     val onOpenProfileTemplate: () -> Unit,
@@ -71,15 +91,17 @@ data class SettingsScreenActions(
     val onSetSuCompatMode: (Int) -> Unit,
     val onSetKernelUmountEnabled: (Boolean) -> Unit,
     val onSetSelinuxHideEnabled: (Boolean) -> Unit,
+    val onSetAvcSpoofEnabled: (Boolean) -> Unit,
+    val onSetMountHideEnabled: (Boolean) -> Unit,
     val onSetSulogEnabled: (Boolean) -> Unit,
     val onSetAdbRootEnabled: (Boolean) -> Unit,
+    val onSetShellSuAdbOnlyEnabled: (Boolean) -> Unit,
     val onSetDefaultUmountModules: (Boolean) -> Unit,
     val onSetEnableWebDebugging: (Boolean) -> Unit,
     val onSetAutoJailbreak: (Boolean) -> Unit,
     val onSetUseSoftReboot: (Boolean) -> Unit,
     val onOpenAbout: () -> Unit,
-    val onSetAlternativeIcon: (Boolean) -> Unit,
     val onOpenTools: () -> Unit,
-    val onOpenKpm: () -> Unit,
     val onOpenSusfsConfig: () -> Unit,
+    val onOpenExtensions: () -> Unit,
 )
