@@ -70,12 +70,8 @@
 //---SPI driver info.---
 #define NVT_SPI_NAME "NVT-ts"
 
-#if NVT_DEBUG
-#define NVT_LOG(fmt, args...)    pr_err("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
-#else
-#define NVT_LOG(fmt, args...)    pr_info("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
-#endif
-#define NVT_ERR(fmt, args...)    pr_err("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
+#define NVT_LOG(fmt, args...)    pr_debug("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
+#define NVT_ERR(fmt, args...)    pr_debug("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
 
 //---Input device info.---
 #define NVT_TS_NAME "NVTCapacitiveTouchScreen"
@@ -102,7 +98,7 @@ extern const uint16_t touch_key_array[TOUCH_KEY_NUM];
 //---Customerized func.---
 #define NVT_TOUCH_PROC 1
 #define NVT_TOUCH_EXT_PROC 1
-#define NVT_TOUCH_MP 0
+#define NVT_TOUCH_MP 1
 #define NVT_SAVE_TEST_DATA_IN_FILE 0
 #define MT_PROTOCOL_B 1
 #define WAKEUP_GESTURE 1
@@ -167,7 +163,6 @@ struct nvt_ts_data {
 #if defined(NVT_PEN_CONNECT_STRATEGY)
 	struct work_struct pen_charge_state_change_work;
 	struct notifier_block pen_charge_state_notifier;
-	int pen_mode_value;
 	bool pen_bluetooth_connect;
 	bool pen_charge_connect;
 	bool game_mode_enable;
@@ -221,8 +216,6 @@ struct nvt_ts_data {
 	uint8_t *xbuf;
 	struct mutex xbuf_lock;
 	bool irq_enabled;
-	bool irq_wake_enabled;
-	bool force_fw_reload;
 	bool pen_support;
 	bool stylus_resol_double;
 	bool fw_debug;
