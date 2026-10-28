@@ -210,6 +210,21 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
 #define MT_CLS_GOOGLE				0x0111
 #define MT_CLS_RAZER_BLADE_STEALTH		0x0112
 #define MT_CLS_SMART_TECH			0x0113
+#define MT_CLS_XIAOMI_PAD6_TP			0x0114
+
+/*
+ * The Xiaomi Pad 6 keyboard-cover touchpad is a virtual HID device that
+ * reports an ABS resolution of 312/331 dpi, derived from the physical
+ * dimensions in its report descriptor. Android converts every finger delta
+ * into millimetres using that value before moving the pointer, so the cursor
+ * crawls roughly seven times slower than a normal touchpad and the cover is
+ * practically unusable. Clamp the reported resolution to a sane value.
+ *
+ * This is a unit conversion, not a sensitivity setting: userspace still sees
+ * the same ABS ranges, only the dpi metadata used for the mm conversion is
+ * replaced.
+ */
+#define MT_XIAOMI_PAD6_TP_RESOLUTION		45
 
 #define MT_DEFAULT_MAXCONTACT	10
 #define MT_MAX_MAXCONTACT	250
@@ -1683,6 +1698,33 @@ static void mt_expired_timeout(struct timer_list *t)
 	clear_bit_unlock(MT_IO_FLAGS_RUNNING, &td->mt_io_flags);
 }
 
+/*
+ * Rewrite the ABS resolution of every input device created for this HID
+ * device. Called after hid_hw_start() so hid-input has already filled in the
+ * per-axis absinfo; the input device is normally opened by userspace only
+ * after ueventd has created the /dev node, which happens well after probe
+ * returns, so the corrected value is the one userspace reads.
+ */
+static void mt_fix_xiaomi_pad6_resolution(struct hid_device *hdev)
+{
+	struct hid_input *hi;
+	int i;
+	static const int axes[] = {
+		ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y
+	};
+
+	list_for_each_entry(hi, &hdev->inputs, list) {
+		if (!hi->input)
+			continue;
+		for (i = 0; i < ARRAY_SIZE(axes); i++) {
+			struct input_absinfo *abs = &hi->input->absinfo[axes[i]];
+
+			if (abs->maximum > abs->minimum)
+				abs->resolution = MT_XIAOMI_PAD6_TP_RESOLUTION;
+		}
+	}
+}
+
 static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	int ret, i;
@@ -1740,6 +1782,9 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		return ret;
 
+	if (id->driver_data == MT_CLS_XIAOMI_PAD6_TP)
+		mt_fix_xiaomi_pad6_resolution(hdev);
+
 	ret = sysfs_create_group(&hdev->dev.kobj, &mt_attribute_group);
 	if (ret)
 		dev_warn(&hdev->dev, "Cannot allocate sysfs group for %s\n",
@@ -1787,6 +1832,11 @@ static void mt_remove(struct hid_device *hdev)
  * So there is no point in adding here any device with MT_CLS_DEFAULT.
  */
 static const struct hid_device_id mt_devices[] = {
+
+	/* Xiaomi Pad 6 keyboard cover touchpad (virtual HID over the pogo pins) */
+	{ .driver_data = MT_CLS_XIAOMI_PAD6_TP,
+		HID_DEVICE(BUS_VIRTUAL, HID_GROUP_MULTITOUCH,
+			0x15d9, 0x00a1) },
 
 	/* 3M panels */
 	{ .driver_data = MT_CLS_3M,
