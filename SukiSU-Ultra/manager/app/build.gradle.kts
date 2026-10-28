@@ -1,6 +1,8 @@
 @file:Suppress("UnstableApiUsage")
 
 import com.google.protobuf.gradle.id
+import java.net.HttpURLConnection
+import java.net.URI
 
 plugins {
     alias(libs.plugins.agp.app)
@@ -149,6 +151,8 @@ android {
         applicationId = managerPackageName
 
         buildConfigField("boolean", "IS_PR_BUILD", isPrBuild.toString())
+        val commit = providers.exec { commandLine("git", "rev-parse", "HEAD") }.standardOutput.asText.get().trim()
+        buildConfigField("String", "MANAGER_COMMIT", "\"$commit\"")
         resValue("string", "app_name", managerName)
 
         externalNativeBuild {
@@ -160,7 +164,7 @@ android {
         }
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "riscv64")
         }
     }
 
@@ -189,6 +193,7 @@ base {
 
 dependencies {
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.splashscreen)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material.icons.extended)
@@ -203,9 +208,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
-
-    implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigationevent.compose)
 
     implementation(libs.com.github.topjohnwu.libsu.core)
@@ -215,6 +217,7 @@ dependencies {
     implementation(libs.dev.rikka.rikkax.parcelablelist)
 
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.commonmark)
     implementation(libs.commonmark.ext.gfm.tables)
@@ -230,9 +233,11 @@ dependencies {
 
     implementation(libs.miuix.ui)
     implementation(libs.miuix.icons)
-    implementation(libs.miuix.navigation3.ui)
+    implementation(libs.miuix.nav)
     implementation(libs.miuix.preference)
     implementation(libs.miuix.blur)
+
+    implementation(libs.reorderable)
 
     implementation(platform(libs.okhttp.bom))
     implementation(libs.okhttp)
@@ -244,6 +249,8 @@ dependencies {
     implementation(libs.commons.compress)
     implementation(libs.xz)
     implementation(libs.protobuf.kotlin.lite)
+
+    testImplementation(libs.junit)
 }
 
 kotlin {
@@ -254,3 +261,77 @@ kotlin {
         )
     }
 }
+
+val kpmToolsDir = layout.buildDirectory.dir("generated/kpmTools")
+val downloadKpmTools = tasks.register("downloadKpmTools") {
+    description = "Download the latest KPM tools to bundle in the APK"
+    outputs.dir(kpmToolsDir)
+    // Keep the downloaded tools in the build directory. Once both files are
+    // present, subsequent builds use the local copies without contacting GitHub.
+    outputs.upToDateWhen {
+        val root = kpmToolsDir.get().asFile
+        root.resolve("jniLibs/arm64-v8a/libkptools.so").isFile &&
+            root.resolve("assets/kpm/kpimg").isFile
+    }
+    doLast {
+        val baseUrl = "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm"
+        val downloads = listOf("kptools-android", "kpimg").associateWith { name ->
+            val target = temporaryDir.resolve(name)
+            val url = "$baseUrl/$name"
+            try {
+                val connection = URI(url).toURL().openConnection() as HttpURLConnection
+                try {
+                    connection.connectTimeout = 10_000
+                    connection.readTimeout = 20_000
+                    connection.useCaches = false
+                    connection.setRequestProperty("User-Agent", "SukiSU-Manager-build")
+                    check(connection.responseCode == HttpURLConnection.HTTP_OK) {
+                        "Cannot download $name: HTTP ${connection.responseCode}"
+                    }
+                    val expectedSize = connection.contentLengthLong
+                    connection.inputStream.use { input ->
+                        target.outputStream().use { input.copyTo(it) }
+                    }
+                    check(target.length() >= 1024 && (expectedSize < 0 || target.length() == expectedSize)) {
+                        "Incomplete KPM tool download: $name"
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (networkError: Exception) {
+                logger.warn("Java HTTPS download failed for $name; retrying with curl", networkError)
+                val process = ProcessBuilder("curl", "--fail", "--location", "--retry", "3", "--silent", "--show-error", "--output", target.absolutePath, url)
+                    .redirectErrorStream(true)
+                    .start()
+                val output = process.inputStream.bufferedReader().use { it.readText() }
+                check(process.waitFor() == 0) { "Cannot download $name with curl: ${output.trim()}" }
+                check(target.length() >= 1024) { "Incomplete KPM tool download: $name" }
+            }
+                if (name == "kptools-android") {
+                    val header = target.inputStream().use { it.readNBytes(4) }
+                    check(header.contentEquals(byteArrayOf(0x7f.toByte(), 0x45, 0x4c, 0x46))) {
+                        "Downloaded kptools-android is not an ELF file"
+                    }
+                    logger.warn("kptools-android architecture check skipped; verify it is ARM64 before releasing")
+                }
+                logger.lifecycle("Downloaded $name (${target.length()} bytes)")
+                target
+            }
+        // Publish only after both downloads have passed validation.
+        val root = kpmToolsDir.get().asFile
+        downloads.forEach { (name, source) ->
+            val relativePath = if (name == "kptools-android") "jniLibs/arm64-v8a/libkptools.so" else "assets/kpm/kpimg"
+            val output = root.resolve(relativePath)
+            check(output.parentFile.isDirectory || output.parentFile.mkdirs()) { "Cannot create $output" }
+            source.copyTo(output, overwrite = true)
+        }
+    }
+}
+android.sourceSets.getByName("main").apply {
+    // The generated directories are populated by downloadKpmTools before preBuild.
+    // Register them directly to avoid the deprecated srcDir(Any) overload.
+    assets.directories.add(kpmToolsDir.get().dir("assets").asFile.toString())
+    // Native libraries are extracted to an executable location by Android.
+    jniLibs.directories.add(kpmToolsDir.get().dir("jniLibs").asFile.toString())
+}
+tasks.named("preBuild").configure { dependsOn(downloadKpmTools) }

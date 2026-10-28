@@ -3,6 +3,7 @@ package com.sukisu.ultra.ui.screen.settings.tools
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.add
@@ -17,7 +18,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Backup
-import androidx.compose.material.icons.rounded.FolderDelete
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Security
@@ -28,9 +28,11 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -41,6 +43,7 @@ import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,6 +55,7 @@ import com.sukisu.ultra.R
 import com.sukisu.ultra.ui.component.KsuIsValid
 import com.sukisu.ultra.ui.component.material.ExpressiveDialog
 import com.sukisu.ultra.ui.component.material.ExpressiveScaffold
+import com.sukisu.ultra.ui.component.material.IconTile
 import com.sukisu.ultra.ui.component.material.SegmentedColumn
 import com.sukisu.ultra.ui.component.material.SegmentedListItem
 import com.sukisu.ultra.ui.component.material.TopBarBackButton
@@ -93,41 +97,8 @@ fun ToolsMaterial(
                         onSelinuxToggle = actions.onSelinuxToggle
                     )
 
-                    SegmentedColumn(
-                        modifier = Modifier.padding(top = 12.dp),
-                        content = listOf({
-                            val umountManager = stringResource(id = R.string.umount_path_manager)
-                            SegmentedListItem(
-                                onClick = actions.onNavigateToUmountManager,
-                                headlineContent = { Text(umountManager) },
-                                leadingContent = {
-                                    Icon(
-                                        Icons.Rounded.FolderDelete,
-                                        umountManager,
-                                        tint = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            )
-                        })
-                    )
-
-                    SegmentedColumn(
-                        modifier = Modifier.padding(top = 12.dp),
-                        content = listOf({
-                            val spoofCpuTitle = stringResource(id = R.string.tools_spoof_cpu_title)
-                            SegmentedListItem(
-                                onClick = actions.onOpenSpoofCpuDialog,
-                                headlineContent = { Text(spoofCpuTitle) },
-                                supportingContent = { Text(stringResource(R.string.tools_spoof_cpu_summary)) },
-                                leadingContent = {
-                                    Icon(
-                                        Icons.Rounded.Memory,
-                                        spoofCpuTitle,
-                                        tint = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            )
-                        })
+                    KernelModulesSectionMaterial(
+                        onOpen = actions.onOpenKernelModules
                     )
 
                     AllowlistBackupSectionMaterial(
@@ -154,11 +125,7 @@ private fun SelinuxToggleSectionMaterial(
                 headlineContent = { Text(stringResource(R.string.tools_selinux_toggle)) },
                 supportingContent = { Text(stringResource(R.string.tools_selinux_summary, statusLabel)) },
                 leadingContent = {
-                    Icon(
-                        imageVector = Icons.Rounded.Security,
-                        contentDescription = stringResource(id = R.string.tools_selinux_toggle),
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
+                    IconTile(Icons.Rounded.Security, stringResource(id = R.string.tools_selinux_toggle))
                 },
                 trailingContent = {
                     Switch(
@@ -167,6 +134,28 @@ private fun SelinuxToggleSectionMaterial(
                         onCheckedChange = onSelinuxToggle
                     )
                 }
+            )
+        })
+    )
+}
+
+@Composable
+private fun KernelModulesSectionMaterial(
+    onOpen: () -> Unit,
+) {
+    SegmentedColumn(
+        modifier = Modifier.padding(top = 12.dp),
+        content = listOf({
+            SegmentedListItem(
+                headlineContent = { Text(stringResource(R.string.kernel_modules_title)) },
+                supportingContent = { Text(stringResource(R.string.tools_kernel_modules_summary)) },
+                leadingContent = {
+                    IconTile(
+                        Icons.Rounded.Memory,
+                        stringResource(R.string.kernel_modules_title),
+                    )
+                },
+                onClick = onOpen,
             )
         })
     )
@@ -185,11 +174,7 @@ private fun AllowlistBackupSectionMaterial(
                     headlineContent = { Text(stringResource(R.string.allowlist_backup_title)) },
                     supportingContent = { Text(stringResource(R.string.allowlist_backup_summary_picker)) },
                     leadingContent = {
-                        Icon(
-                            imageVector = Icons.Rounded.Backup,
-                            contentDescription = stringResource(R.string.allowlist_backup_title),
-                            tint = MaterialTheme.colorScheme.onSurface
-                        )
+                        IconTile(Icons.Rounded.Backup, stringResource(R.string.allowlist_backup_title))
                     },
                     onClick = onBackup
                 )
@@ -199,11 +184,7 @@ private fun AllowlistBackupSectionMaterial(
                     headlineContent = { Text(stringResource(R.string.allowlist_restore_title)) },
                     supportingContent = { Text(stringResource(R.string.allowlist_restore_summary_picker)) },
                     leadingContent = {
-                        Icon(
-                            imageVector = Icons.Rounded.Restore,
-                            contentDescription = stringResource(R.string.allowlist_restore_title),
-                            tint = MaterialTheme.colorScheme.onSurface
-                        )
+                        IconTile(Icons.Rounded.Restore, stringResource(R.string.allowlist_restore_title))
                     },
                     onClick = onRestore
                 )
@@ -217,7 +198,8 @@ private fun AllowlistBackupSectionMaterial(
 fun SpoofCpuDialogMaterial(
     currentCpuInfo: CpuInfo?,
     onDismiss: () -> Unit,
-    onApply: (SpoofCpuParams) -> Unit
+    onApply: (SpoofCpuParams) -> Unit,
+    onRestore: () -> Unit
 ) {
     var selectedPreset by remember { mutableStateOf("custom") }
     var midrValue by remember { mutableStateOf(currentCpuInfo?.midrHex ?: "0x0") }
@@ -227,22 +209,13 @@ fun SpoofCpuDialogMaterial(
     val coreCount = currentCpuInfo?.coreCount ?: 8
     var selectedCores by remember { mutableStateOf((0 until coreCount).toList()) }
     var presetExpanded by remember { mutableStateOf(false) }
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
 
-    val presetList = listOf(
-        "custom" to stringResource(R.string.spoof_cpu_midr_custom),
-        "0x413fd050" to "Cortex-A55",
-        "0x413fd0b1" to "Cortex-A76",
-        "0x413fd0d2" to "Cortex-A78",
-        "0x413fd0d4" to "Cortex-A710",
-        "0x413fd0d5" to "Cortex-A715",
-        "0x413fd0c1" to "Cortex-X1",
-        "0x413fd0e3" to "Cortex-X3",
-        "0x413fd0c0" to "Neoverse N1",
-        "0x511f804d" to "Kryo 4xx Gold",
-        "0x511f805c" to "Kryo 5xx Gold",
-        "0x513f8050" to "Kryo 6xx Gold+",
-        "0x553f1000" to "Exynos M5"
-    )
+    val presetList = spoofCpuPresetList()
+    val presetLabels = presetList.map { preset ->
+        preset.coreTypeRes?.let { stringResource(it, preset.model) }
+            ?: stringResource(R.string.spoof_cpu_midr_custom)
+    }
 
     ExpressiveDialog(
         onDismissRequest = onDismiss,
@@ -254,10 +227,24 @@ fun SpoofCpuDialogMaterial(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                OutlinedButton(
+                    onClick = onRestore,
+                    enabled = currentCpuInfo != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(stringResource(R.string.spoof_cpu_restore))
+                }
+
                 Text(
                     text = stringResource(R.string.spoof_cpu_warning),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error
+                )
+
+                Text(
+                    text = stringResource(R.string.spoof_cpu_field_midr),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 ExposedDropdownMenuBox(
@@ -265,7 +252,7 @@ fun SpoofCpuDialogMaterial(
                     onExpandedChange = { presetExpanded = it }
                 ) {
                     OutlinedTextField(
-                        value = presetList.find { it.first == selectedPreset }?.second ?: "",
+                        value = presetLabels.getOrElse(presetList.indexOfFirst { it.id == selectedPreset }) { "" },
                         onValueChange = {},
                         readOnly = true,
                         label = { Text(stringResource(R.string.spoof_cpu_midr_preset_label)) },
@@ -278,13 +265,13 @@ fun SpoofCpuDialogMaterial(
                         expanded = presetExpanded,
                         onDismissRequest = { presetExpanded = false }
                     ) {
-                        presetList.forEach { (value, label) ->
+                        presetList.forEach { preset ->
                             DropdownMenuItem(
-                                text = { Text(label) },
+                                text = { Text(presetLabels[presetList.indexOf(preset)]) },
                                 onClick = {
-                                    selectedPreset = value
-                                    if (value != "custom") {
-                                        midrValue = value
+                                    selectedPreset = preset.id
+                                    if (preset.midrHex != "custom") {
+                                        midrValue = preset.midrHex
                                     }
                                     presetExpanded = false
                                 }
@@ -297,65 +284,70 @@ fun SpoofCpuDialogMaterial(
                     value = midrValue,
                     onValueChange = { midrValue = it; selectedPreset = "custom" },
                     label = { Text(stringResource(R.string.spoof_cpu_field_midr)) },
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = bogomipsValue,
-                    onValueChange = { bogomipsValue = it },
-                    label = { Text(stringResource(R.string.spoof_cpu_field_bogomips)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = hwcapValue,
-                    onValueChange = { hwcapValue = it },
-                    label = { Text(stringResource(R.string.spoof_cpu_field_hwcap)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = hwcap2Value,
-                    onValueChange = { hwcap2Value = it },
-                    label = { Text(stringResource(R.string.spoof_cpu_field_hwcap2)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text(
-                    text = stringResource(R.string.spoof_cpu_field_cores),
-                    style = MaterialTheme.typography.titleSmall
                 )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Checkbox(
-                        checked = selectedCores.size == coreCount,
-                        onCheckedChange = { checked ->
-                            selectedCores = if (checked) (0 until coreCount).toList() else emptyList()
-                        }
+                    Text(
+                        text = stringResource(R.string.spoof_cpu_field_cores),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f)
                     )
-                    Text(stringResource(R.string.spoof_cpu_cores_all))
+                    TextButton(
+                        onClick = {
+                            selectedCores = if (selectedCores.size == coreCount) emptyList() else (0 until coreCount).toList()
+                        }
+                    ) {
+                        Text(stringResource(R.string.spoof_cpu_cores_all))
+                    }
                 }
 
-                repeat(coreCount) { index ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(
-                            checked = selectedCores.contains(index),
-                            onCheckedChange = { checked ->
-                                selectedCores = if (checked) {
-                                    selectedCores + index
-                                } else {
-                                    selectedCores - index
-                                }
-                            }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    repeat(coreCount) { index ->
+                        FilterChip(
+                            selected = index in selectedCores,
+                            onClick = {
+                                selectedCores = if (index in selectedCores) selectedCores - index else selectedCores + index
+                            },
+                            label = { Text(stringResource(R.string.spoof_cpu_cores_format, index)) }
                         )
-                        Text(stringResource(R.string.spoof_cpu_cores_format, index))
                     }
+                }
+
+                TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
+                    Text(stringResource(R.string.spoof_cpu_advanced))
+                    Text(if (advancedExpanded) "−" else "+")
+                }
+
+                if (advancedExpanded) {
+                    OutlinedTextField(
+                        value = bogomipsValue,
+                        onValueChange = { bogomipsValue = it },
+                        label = { Text(stringResource(R.string.spoof_cpu_field_bogomips)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = hwcapValue,
+                        onValueChange = { hwcapValue = it },
+                        label = { Text(stringResource(R.string.spoof_cpu_field_hwcap)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = hwcap2Value,
+                        onValueChange = { hwcap2Value = it },
+                        label = { Text(stringResource(R.string.spoof_cpu_field_hwcap2)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         },

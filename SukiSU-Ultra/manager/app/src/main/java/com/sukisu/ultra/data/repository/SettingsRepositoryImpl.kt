@@ -12,20 +12,28 @@ import com.sukisu.ultra.Natives
 import com.sukisu.ultra.ksuApp
 import com.sukisu.ultra.magica.BootCompletedReceiver
 import com.sukisu.ultra.ui.UiMode
+import com.sukisu.ultra.ui.screen.module.ModuleNameSort
 import com.sukisu.ultra.ui.screen.modulerepo.RepoSort
 import com.sukisu.ultra.ui.util.execKsud
 import com.sukisu.ultra.ui.util.getFeaturePersistValue
+import com.sukisu.ultra.ui.util.getFeatureValue
 import com.sukisu.ultra.ui.util.getFeatureStatus
 import com.sukisu.ultra.ui.util.LocaleHelper
 import java.security.SecureRandom
 
 private const val SETTINGS_PREFS = "settings"
 private const val KEY_USE_SOFT_REBOOT = "soft_reboot"
+private const val KEY_AUTO_DELETE_MODULE_ZIP = "auto_delete_module_zip"
 
 /** Prefer soft reboot: always in jailbreak mode, or when the setting is enabled. */
 fun isSoftRebootPreferred(): Boolean =
     Natives.isLateLoadMode || ksuApp.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
         .getBoolean(KEY_USE_SOFT_REBOOT, false)
+
+/** Delete module ZIPs downloaded by the manager once they have been installed successfully. */
+fun isAutoDeleteModuleZipEnabled(): Boolean =
+    ksuApp.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        .getBoolean(KEY_AUTO_DELETE_MODULE_ZIP, false)
 
 class SettingsRepositoryImpl : SettingsRepository {
 
@@ -39,8 +47,19 @@ class SettingsRepositoryImpl : SettingsRepository {
     }
 
     override var uiMode: String
-        get() = prefs.getString("ui_mode", UiMode.DEFAULT_VALUE) ?: UiMode.DEFAULT_VALUE
+        get() = prefs.getString("ui_mode", null) ?: initialUiMode().also { mode ->
+            prefs.edit { putString("ui_mode", mode) }
+        }
         set(value) = prefs.edit { putString("ui_mode", value) }
+
+    // Fresh installs default to Material; upgrades that never picked a mode keep the previous Miuix default.
+    private fun initialUiMode(): String {
+        val freshInstall = runCatching {
+            val info = ksuApp.packageManager.getPackageInfo(ksuApp.packageName, 0)
+            info.firstInstallTime == info.lastUpdateTime
+        }.getOrDefault(false)
+        return if (freshInstall) UiMode.DEFAULT_VALUE else UiMode.Miuix.value
+    }
 
     override var appLanguage: String
         get() = LocaleHelper.getCurrentLanguage(ksuApp)
@@ -50,9 +69,17 @@ class SettingsRepositoryImpl : SettingsRepository {
         get() = prefs.getBoolean("check_update", true)
         set(value) = prefs.edit { putBoolean("check_update", value) }
 
+    override var checkCiUpdate: Boolean
+        get() = prefs.getBoolean("check_ci_update", false)
+        set(value) = prefs.edit { putBoolean("check_ci_update", value) }
+
     override var checkModuleUpdate: Boolean
         get() = prefs.getBoolean("module_check_update", true)
         set(value) = prefs.edit { putBoolean("module_check_update", value) }
+
+    override var autoDeleteModuleZip: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_DELETE_MODULE_ZIP, false)
+        set(value) = prefs.edit { putBoolean(KEY_AUTO_DELETE_MODULE_ZIP, value) }
 
     override var alternativeIcon : Boolean
         get() = prefs.getBoolean("use_alt_icon", false)
@@ -82,6 +109,14 @@ class SettingsRepositoryImpl : SettingsRepository {
         get() = prefs.getBoolean("enable_predictive_back", false)
         set(value) = prefs.edit { putBoolean("enable_predictive_back", value) }
 
+    override var enableSwipeDismiss: Boolean
+        get() = prefs.getBoolean("enable_swipe_dismiss", true)
+        set(value) = prefs.edit { putBoolean("enable_swipe_dismiss", value) }
+
+    override var pagerInterceptionMode: Int
+        get() = prefs.getInt("pager_interception_mode", 1)
+        set(value) = prefs.edit { putInt("pager_interception_mode", value.coerceIn(0, 2)) }
+
     override var enableBlur: Boolean
         get() = prefs.getBoolean("enable_blur", false)
         set(value) = prefs.edit { putBoolean("enable_blur", value) }
@@ -98,9 +133,17 @@ class SettingsRepositoryImpl : SettingsRepository {
         get() = prefs.getBoolean("enable_navigation_badge", true)
         set(value) = prefs.edit { putBoolean("enable_navigation_badge", value) }
 
+    override var navigationRailExpanded: Boolean
+        get() = prefs.getBoolean("nav_rail_expanded", false)
+        set(value) = prefs.edit { putBoolean("nav_rail_expanded", value) }
+
     override var pageScale: Float
         get() = prefs.getFloat("page_scale", 1.0f)
         set(value) = prefs.edit { putFloat("page_scale", value) }
+
+    override var moduleDescriptionMaxLines: Int
+        get() = prefs.getInt("module_description_max_lines", 4)
+        set(value) = prefs.edit { putInt("module_description_max_lines", value) }
 
     override var enableWebDebugging: Boolean
         get() = prefs.getBoolean("enable_web_debugging", false)
@@ -114,9 +157,39 @@ class SettingsRepositoryImpl : SettingsRepository {
         get() = prefs.getBoolean("module_sort_action_first", false)
         set(value) = prefs.edit { putBoolean("module_sort_action_first", value) }
 
-    override var moduleRepoSortOrder: Int
-        get() = prefs.getInt("module_repo_sort_order", RepoSort.UPDATED.ordinal)
-        set(value) = prefs.edit { putInt("module_repo_sort_order", value) }
+    override var moduleSortWebUiFirst: Boolean
+        get() = prefs.getBoolean("module_sort_webui_first", false)
+        set(value) = prefs.edit { putBoolean("module_sort_webui_first", value) }
+
+    override var moduleSortZygiskFirst: Boolean
+        get() = prefs.getBoolean("module_sort_zygisk_first", false)
+        set(value) = prefs.edit { putBoolean("module_sort_zygisk_first", value) }
+
+    override var moduleSortMetamoduleFirst: Boolean
+        get() = prefs.getBoolean("module_sort_metamodule_first", false)
+        set(value) = prefs.edit { putBoolean("module_sort_metamodule_first", value) }
+
+    override var moduleSortNameOrder: String
+        get() = ModuleNameSort.fromStored(prefs.getString("module_sort_name_order", null)).name
+        set(value) = prefs.edit { putString("module_sort_name_order", value) }
+
+    override var moduleSortManual: Boolean
+        get() = prefs.getBoolean("module_sort_manual", false)
+        set(value) = prefs.edit { putBoolean("module_sort_manual", value) }
+
+    override var moduleManualOrder: String
+        get() = prefs.getString("module_manual_order", "") ?: ""
+        set(value) = prefs.edit { putString("module_manual_order", value) }
+
+    override var moduleRepoSortOrder: String
+        get() = RepoSort.fromStored(
+            name = prefs.getString("module_repo_sort", null),
+            legacyOrdinal = if (prefs.contains("module_repo_sort_order")) prefs.getInt("module_repo_sort_order", 0) else null,
+        ).name
+        set(value) = prefs.edit {
+            putString("module_repo_sort", value)
+            remove("module_repo_sort_order")
+        }
 
     override var superuserShowSystemApps: Boolean
         get() = prefs.getBoolean("show_system_apps", false)
@@ -137,6 +210,10 @@ class SettingsRepositoryImpl : SettingsRepository {
     override var showFullStatus: Boolean
         get() = prefs.getBoolean("show_fingerprint", true)
         set(value) = prefs.edit { putBoolean("show_fingerprint", value) }
+
+    override var hideHomeWarnings: Boolean
+        get() = prefs.getBoolean("hide_home_warnings", false)
+        set(value) = prefs.edit { putBoolean("hide_home_warnings", value) }
 
     override var autoJailbreak: Boolean
         get() = prefs.getBoolean("auto_jailbreak", false)
@@ -193,15 +270,29 @@ class SettingsRepositoryImpl : SettingsRepository {
 
     override fun setSelinuxHideEnabled(enabled: Boolean): Int = Natives.setSelinuxHideEnabled(enabled)
 
+    override suspend fun getAvcSpoofStatus(): String = getFeatureStatus("avc_spoof")
+    override fun isAvcSpoofEnabled(): Boolean = Natives.isAvcSpoofEnabled()
+    override fun setAvcSpoofEnabled(enabled: Boolean): Boolean = Natives.setAvcSpoofEnabled(enabled)
+
+    override suspend fun getMountHideStatus(): String = getFeatureStatus("mount_hide")
+
+    override fun isMountHideEnabled(): Boolean = Natives.isMountHideEnabled()
+
+    override fun setMountHideEnabled(enabled: Boolean): Int = Natives.setMountHideEnabled(enabled)
+
     override suspend fun getSulogStatus(): String = getFeatureStatus("sulog")
 
     override suspend fun getSulogPersistValue(): Long? = getFeaturePersistValue("sulog")
+
+    override suspend fun getSulogValue(): Long? = getFeatureValue("sulog")
 
     override fun setSulogEnabled(enabled: Boolean): Boolean = execKsud("feature set sulog ${if (enabled) 1 else 0}", true)
 
     override suspend fun getAdbRootStatus(): String = getFeatureStatus("adb_root")
 
     override suspend fun getAdbRootPersistValue(): Long? = getFeaturePersistValue("adb_root")
+
+    override suspend fun getAdbRootValue(): Long? = getFeatureValue("adb_root")
 
     override fun setAdbRootEnabled(enabled: Boolean): Boolean =
         if (execKsud("feature set adb_root ${if (enabled) 1 else 0}", true)) {
@@ -210,6 +301,15 @@ class SettingsRepositoryImpl : SettingsRepository {
         } else {
             false
         }
+
+    override suspend fun getShellSuAdbOnlyStatus(): String = getFeatureStatus("shell_su_adb_only")
+
+    override suspend fun getShellSuAdbOnlyValue(): Long? = getFeatureValue("shell_su_adb_only")
+
+    override suspend fun getShellSuAdbOnlyPersistValue(): Long? = getFeaturePersistValue("shell_su_adb_only")
+
+    override fun setShellSuAdbOnlyEnabled(enabled: Boolean): Boolean =
+        execKsud("feature set shell_su_adb_only ${if (enabled) 1 else 0}", true)
 
     override fun isDefaultUmountModules(): Boolean = Natives.isDefaultUmountModules()
 

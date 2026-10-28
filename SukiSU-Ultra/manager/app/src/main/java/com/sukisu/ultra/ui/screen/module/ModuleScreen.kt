@@ -9,8 +9,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
@@ -22,11 +23,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import com.sukisu.ultra.R
+import com.sukisu.ultra.data.script.ScriptRepository
 import com.sukisu.ultra.ui.LocalUiMode
 import com.sukisu.ultra.ui.UiMode
+import com.sukisu.ultra.ui.component.SearchStatus
 import com.sukisu.ultra.ui.navigation3.LocalNavigator
 import com.sukisu.ultra.ui.navigation3.Route
 import com.sukisu.ultra.ui.screen.flash.FlashIt
+import com.sukisu.ultra.ui.screen.modulerepo.downloadFailureMessage
+import com.sukisu.ultra.ui.screen.scriptrun.ScriptRunArg
 import com.sukisu.ultra.ui.util.download
 import com.sukisu.ultra.ui.util.module.Shortcut
 import com.sukisu.ultra.ui.viewmodel.ModuleViewModel
@@ -35,7 +40,7 @@ import com.sukisu.ultra.ui.webui.WebUIActivity
 @Composable
 fun ModulePager(
     bottomInnerPadding: Dp,
-    isCurrentPage: Boolean = true
+    isCurrentPage: Boolean = true,
 ) {
     val uiMode = LocalUiMode.current
     val navigator = LocalNavigator.current
@@ -54,26 +59,41 @@ fun ModulePager(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { /* Download works regardless of result */ }
+    val latestIsCurrentPage by rememberUpdatedState(isCurrentPage)
+    val initialResumeHandled = rememberSaveable { mutableStateOf(false) }
 
-    var hasActivated by remember { mutableStateOf(false) }
-    if (isCurrentPage) hasActivated = true
+    var hasActivated by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(isCurrentPage) {
+        if (isCurrentPage) {
+            if (!hasActivated) {
+                hasActivated = true
+                viewModel.refreshEnvironmentState()
+                viewModel.initializePreferences()
+                val state = viewModel.uiState.value
+                if (!state.hasLoaded && !state.isRefreshing) {
+                    viewModel.fetchModuleList()
+                }
+                if (Build.VERSION.SDK_INT >= 33) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        } else if (!rawUiState.searchStatus.isCollapsed()) {
+            viewModel.updateSearchStatus(rawUiState.searchStatus.copy(searchText = "", current = SearchStatus.Status.COLLAPSED))
+        }
+    }
 
-    if (hasActivated) {
-        LaunchedEffect(Unit) {
-            viewModel.refreshEnvironmentState()
-            viewModel.initializePreferences()
-            if (Build.VERSION.SDK_INT >= 33) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    LifecycleResumeEffect(Unit) {
+        if (initialResumeHandled.value && latestIsCurrentPage) {
+            val state = viewModel.uiState.value
+            if (!state.isRefreshing) {
+                viewModel.fetchModuleList(
+                    checkUpdate = !state.hasLoaded || viewModel.isNeedRefresh,
+                    resort = !state.hasLoaded,
+                )
             }
         }
-
-        LifecycleResumeEffect(Unit) {
-            viewModel.fetchModuleList(
-                checkUpdate = rawUiState.moduleList.isEmpty() || viewModel.isNeedRefresh,
-                resort = rawUiState.moduleList.isEmpty(),
-            )
-            onPauseOrDispose {}
-        }
+        initialResumeHandled.value = true
+        onPauseOrDispose {}
     }
 
     val actions = ModuleActions(
@@ -103,6 +123,14 @@ fun ModulePager(
                 download(
                     url = request.downloadUrl,
                     fileName = request.fileName,
+                    // Registry releases are size + SHA-256 checked, kept app-private and
+                    // re-verified by the flash step; other updateJson sources are unchanged.
+                    expected = request.expected,
+                    onFailed = { failed ->
+                        viewModel.emitEffect(
+                            ModuleEffect.Toast(downloadFailureMessage(context, failed, request.fileName))
+                        )
+                    },
                     onDownloaded = { uri ->
                         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                             navigator.push(Route.Flash(FlashIt.FlashModules(listOf(uri))))
@@ -127,6 +155,27 @@ fun ModulePager(
         onToggleSortEnabledFirst = {
             viewModel.toggleSortEnabledFirst()
         },
+        onToggleSortWebUiFirst = {
+            viewModel.toggleSortWebUiFirst()
+        },
+        onToggleSortZygiskFirst = {
+            viewModel.toggleSortZygiskFirst()
+        },
+        onToggleSortMetamoduleFirst = {
+            viewModel.toggleSortMetamoduleFirst()
+        },
+        onSetSortNameOrder = {
+            viewModel.setSortNameOrder(it)
+        },
+        onToggleSortManual = {
+            viewModel.toggleSortManual()
+        },
+        onMoveModule = { from, to ->
+            viewModel.moveModule(from, to)
+        },
+        onCommitManualOrder = {
+            viewModel.commitManualOrder()
+        },
         onOpenWebUi = { module ->
             webUILauncher.launch(
                 Intent(context, WebUIActivity::class.java)
@@ -145,7 +194,20 @@ fun ModulePager(
             viewModel.undoUninstallModule(module)
         },
         onOpenFlash = { uris ->
-            if (uris.isNotEmpty()) {
+            if (uris.size == 1) {
+                // A one-shot script ZIP is offered to be run instead (or installed anyway).
+                scope.launch {
+                    val script = ScriptRepository.peekOneshot(uris.first())
+                    if (script != null) {
+                        navigator.push(
+                            Route.ScriptRun(ScriptRunArg(uris.first(), offerInstall = true, displayName = script.name))
+                        )
+                    } else {
+                        navigator.push(Route.Flash(FlashIt.FlashModules(uris)))
+                    }
+                    viewModel.markNeedRefresh()
+                }
+            } else if (uris.isNotEmpty()) {
                 navigator.push(Route.Flash(FlashIt.FlashModules(uris)))
                 viewModel.markNeedRefresh()
             }

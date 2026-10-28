@@ -1,5 +1,6 @@
 package com.sukisu.ultra.ui.screen.appprofile
 
+import com.sukisu.ultra.ui.component.profile.TemporaryRootControls
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -21,15 +22,17 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
-import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +46,13 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -65,6 +75,7 @@ import com.sukisu.ultra.ui.util.setSepolicy
 import com.sukisu.ultra.ui.viewmodel.SuperUserViewModel
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ListPopupColumn
@@ -72,6 +83,12 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
+import top.yukonga.miuix.kmp.basic.Switch
+import androidx.compose.foundation.layout.offset
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.unit.IntOffset
+import com.sukisu.ultra.ui.viewmodel.getTemplateInfoById
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
@@ -82,8 +99,8 @@ import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
-import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
@@ -142,7 +159,7 @@ fun AppProfileScreenMiuix(
                             AppIconImage(
                                 packageInfo = state.appGroup.primary.packageInfo,
                                 label = state.appGroup.primary.label,
-                                modifier = Modifier.size(64.dp)
+                                modifier = Modifier.size(60.dp).clip(RoundedCornerShape(20.dp))
                             )
                         },
                         appUid = state.uid,
@@ -156,6 +173,10 @@ fun AppProfileScreenMiuix(
                         onViewTemplate = actions.onViewTemplate,
                         onManageTemplate = actions.onManageTemplate,
                         onProfileChange = actions.onProfileChange,
+                        onPermanentRootChange = actions.onPermanentRootChange,
+                        temporaryRoot = state.temporaryRoot,
+                        onTemporaryRootChange = actions.onTemporaryRootChange,
+                        onTemporaryRootGrant = actions.onTemporaryRootGrant,
                     )
                     Spacer(
                         Modifier.height(
@@ -180,6 +201,10 @@ private fun AppProfileInner(
     appVersionName: String,
     appVersionCode: Long,
     profile: Natives.Profile,
+    onPermanentRootChange: (Boolean) -> Unit = {},
+    temporaryRoot: Boolean = false,
+    onTemporaryRootChange: (Boolean) -> Unit = {},
+    onTemporaryRootGrant: (Long?) -> Unit = {},
     isUidGroup: Boolean = false,
     isSpecialApp: Boolean = false,
     affectedApps: List<SuperUserViewModel.AppInfo> = emptyList(),
@@ -192,152 +217,138 @@ private fun AppProfileInner(
     val appId = appUid % 100000
     val templates = remember { listAppProfileTemplates() }
 
+    val initialRootMode = if (profile.rootUseDefault) {
+        Mode.Default
+    } else if (profile.rootTemplate != null) {
+        Mode.Template
+    } else {
+        Mode.Custom
+    }
+    var rootMode by rememberSaveable {
+        mutableStateOf(initialRootMode)
+    }
+    val nonRootMode = if (profile.nonRootUseDefault) Mode.Default else Mode.Custom
+    val dropdownMode = if (isRootGranted) rootMode else nonRootMode
+
     Column(
         modifier = modifier
     ) {
-        Card(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(start = 12.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)
+                .padding(horizontal = 24.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
+            appIcon()
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                appIcon()
-                Column(
-                    modifier = Modifier
-                        .padding(start = 12.dp, end = 8.dp)
-                        .weight(1f),
-                ) {
+                Text(
+                    text = appLabel,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = colorScheme.onSurface,
+                    modifier = Modifier.basicMarquee(),
+                    maxLines = 1,
+                    softWrap = false
+                )
+                val details = buildList {
+                    if (isSpecialApp) {
+                        add(packageName)
+                    } else if (!isUidGroup) {
+                        add(packageName)
+                        add("$appVersionName ($appVersionCode)")
+                    } else {
+                        if (sharedUserId.isNotEmpty()) add(sharedUserId)
+                        add(stringResource(R.string.group_contains_apps, affectedApps.size))
+                    }
+                }
+                details.forEach {
                     Text(
-                        text = appLabel,
-                        color = colorScheme.onSurface,
-                        fontWeight = FontWeight(550),
-                        modifier = Modifier
-                            .basicMarquee(),
+                        text = it,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.basicMarquee(),
                         maxLines = 1,
                         softWrap = false
                     )
-                    if (isSpecialApp) {
-                        Text(
-                            text = packageName,
-                            fontSize = 12.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.basicMarquee(),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    } else if (!isUidGroup) {
-                        Text(
-                            text = "$appVersionName ($appVersionCode)",
-                            fontSize = 12.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .basicMarquee(),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                        Text(
-                            text = packageName,
-                            fontSize = 12.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .basicMarquee(),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    } else {
-                        if (sharedUserId.isNotEmpty()) {
-                            Text(
-                                text = sharedUserId,
-                                fontSize = 12.sp,
-                                color = colorScheme.onSurfaceVariantSummary,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier
-                                    .basicMarquee(),
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                        Text(
-                            text = stringResource(R.string.group_contains_apps, affectedApps.size),
-                            fontSize = 12.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .basicMarquee(),
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
                 }
-                Column(
-                    modifier = Modifier,
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+            }
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (userId != 0) {
+                    StatusTag(
+                        label = "USER $userId",
+                        backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
+                        contentColor = colorScheme.onPrimary
+                    )
+                }
+                StatusTag(
+                    label = "UID ${if (userId != 0) appId else appUid}",
+                    backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
+                    contentColor = colorScheme.onPrimary
+                )
+            }
+        }
+
+        if (!isSpecialApp) {
+            val checked = isRootGranted
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .padding(top = 4.dp, bottom = 12.dp)
+                    .semantics {
+                        role = Role.Switch
+                        toggleableState = ToggleableState(checked)
+                    },
+                colors = CardDefaults.defaultColors(
+                    color = if (checked) colorScheme.primary else colorScheme.surfaceContainer
+                ),
+                insideMargin = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
+                onClick = { onPermanentRootChange(!checked) },
+                pressFeedbackType = PressFeedbackType.Sink,
+            ) {
+                Row(
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (userId != 0) {
-                        StatusTag(
-                            label = "USER $userId",
-                            backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
-                            contentColor = colorScheme.onPrimary
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(id = R.string.superuser),
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (checked) colorScheme.onPrimary else colorScheme.onSurface,
                         )
-                        StatusTag(
-                            label = "UID $appId",
-                            backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
-                            contentColor = colorScheme.onPrimary
-                        )
-                    } else {
-                        StatusTag(
-                            label = "UID $appUid",
-                            backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
-                            contentColor = colorScheme.onPrimary
+                        Text(
+                            text = if (isRootGranted && temporaryRoot) stringResource(R.string.temporary_root_active) else dropdownMode.text,
+                            fontSize = 13.sp,
+                            color = if (checked) {
+                                colorScheme.onPrimary.copy(alpha = 0.75f)
+                            } else {
+                                colorScheme.onSurfaceVariantSummary
+                            },
                         )
                     }
+                    SuperuserSwitch(checked = checked)
                 }
             }
         }
 
         if (!isSpecialApp) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(bottom = 12.dp),
-            ) {
-                SwitchPreference(
-                    startAction = {
-                        Icon(
-                            imageVector = Icons.Rounded.Security,
-                            contentDescription = null,
-                            modifier = Modifier.padding(end = 6.dp),
-                            tint = colorScheme.onBackground
-                        )
-                    },
-                    title = stringResource(id = R.string.superuser),
-                    checked = isRootGranted,
-                    onCheckedChange = { onProfileChange(profile.copy(allowSu = it)) },
-                )
-            }
+            TemporaryRootControls(
+                enabled = temporaryRoot,
+                granted = isRootGranted,
+                onEnabledChange = onTemporaryRootChange,
+                onChoose = onTemporaryRootGrant,
+            )
         }
 
-        val initialRootMode = if (profile.rootUseDefault) {
-            Mode.Default
-        } else if (profile.rootTemplate != null) {
-            Mode.Template
-        } else {
-            Mode.Custom
-        }
-        var rootMode by rememberSaveable {
-            mutableStateOf(initialRootMode)
-        }
-        val nonRootMode = if (profile.nonRootUseDefault) Mode.Default else Mode.Custom
-        val dropdownMode = if (isRootGranted) rootMode else nonRootMode
         ProfileBox(dropdownMode, isRootGranted) { mode ->
             if (isRootGranted) {
                 when (mode) {
@@ -354,7 +365,7 @@ private fun AppProfileInner(
                     Mode.Template -> {
                         if (templates.isNotEmpty()) {
                             val selected = profile.rootTemplate ?: templates[0]
-                            val info = com.sukisu.ultra.ui.viewmodel.getTemplateInfoById(selected)
+                            val info = getTemplateInfoById(selected)
                             if (info != null && setSepolicy(selected, info.rules.joinToString("\n"))) {
                                 onProfileChange(
                                     profile.copy(
@@ -615,6 +626,37 @@ private fun ProfileBox(
             selectedIndex = if (selectedIndex == -1) 0 else selectedIndex,
         ) {
             onModeChange(modesAndTitles[it].first)
+        }
+    }
+}
+/** Local decoration for the superuser card; other Miuix switches stay unchanged. */
+@Composable
+private fun SuperuserSwitch(checked: Boolean) {
+    // Match the thumb geometry and spring in Miuix 0.9.4. Keep the icon in
+    // logical start coordinates so that it follows the thumb in RTL as well.
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 25.dp else 4.dp,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 987f),
+        label = "superuser_check_offset",
+    )
+    Box(Modifier.size(width = 49.dp, height = 28.dp)) {
+        // The enclosing card owns the click action and switch semantics.
+        Switch(checked = checked, onCheckedChange = null)
+        if (checked) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(thumbOffset.roundToPx(), 0) }
+                    .size(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
     }
 }

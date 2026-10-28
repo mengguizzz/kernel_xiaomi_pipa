@@ -6,6 +6,7 @@ import androidx.compose.runtime.Immutable
 import kotlinx.parcelize.Parcelize
 import kotlinx.serialization.Serializable
 import com.sukisu.ultra.Natives.Profile.RootProfileFlag
+import com.sukisu.ultra.ui.util.rootAvailable
 
 /**
  * @author weishu
@@ -26,7 +27,8 @@ object Natives {
     const val MINIMAL_SUPPORTED_KERNEL = 32513
 
     // Get full version
-    external fun getFullVersion(): String
+    // The kernel returns null when the GET_FULL_VERSION supercall is unavailable.
+    external fun getFullVersion(): String?
     const val MINIMAL_SUPPORTED_KERNEL_FULL = "v4.0.0"
 
     // 12040: Support disable sucompat mode
@@ -64,6 +66,9 @@ object Natives {
         external get
 
     val isLkmMode: Boolean
+        external get
+
+    val isLkmBundled: Boolean
         external get
 
     val isLateLoadMode: Boolean
@@ -112,6 +117,19 @@ object Natives {
     external fun isSelinuxHideEnabled(): Boolean
     external fun setSelinuxHideEnabled(enabled: Boolean): Int
 
+    /** AVC audit log SID spoofing. */
+    external fun isAvcSpoofEnabled(): Boolean
+    external fun setAvcSpoofEnabled(enabled: Boolean): Boolean
+
+    /**
+     * Mount hide can be disabled temporarily.
+     *  0: disabled
+     *  1: enabled
+     *  negative : error
+     */
+    external fun isMountHideEnabled(): Boolean
+    external fun setMountHideEnabled(enabled: Boolean): Int
+
     /**
      * Get the user name for the uid.
      */
@@ -147,13 +165,17 @@ object Natives {
     val managerUAPIVersion: Int
         external get
 
-    fun checkUAPIMismatch(): Boolean {
-        return kernelUAPIVersion != managerUAPIVersion
-    }
+    /**
+     * Root through some other means, no SukiSU kernel. Kernel calls just return defaults here,
+     * so the pages can be opened and browsed.
+     */
+    fun isPreviewMode(): Boolean = !isManager && rootAvailable()
 
-    fun requireNewKernel(): Boolean {
-        if (version != -1 && version < MINIMAL_SUPPORTED_KERNEL) return true
-        return (isVersionLessThan(getFullVersion(), MINIMAL_SUPPORTED_KERNEL_FULL)) || checkUAPIMismatch()
+    fun isFullFeatured(): Boolean {
+        val kernelFullVersion = getFullVersion()
+        return (kernelFullVersion != null && isVersionLessThan(kernelFullVersion, MINIMAL_SUPPORTED_KERNEL_FULL)) ||
+                isManager && kernelUAPIVersion == managerUAPIVersion && rootAvailable() ||
+                isPreviewMode()
     }
 
     @Keep

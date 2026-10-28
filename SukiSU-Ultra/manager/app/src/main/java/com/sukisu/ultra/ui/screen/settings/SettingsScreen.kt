@@ -1,8 +1,12 @@
 package com.sukisu.ultra.ui.screen.settings
 
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -11,29 +15,40 @@ import com.sukisu.ultra.ui.LocalUiMode
 import com.sukisu.ultra.ui.UiMode
 import com.sukisu.ultra.ui.navigation3.Navigator
 import com.sukisu.ultra.ui.navigation3.Route
-import com.sukisu.ultra.ui.util.getSuSFSStatus
-import com.sukisu.ultra.ui.util.rememberKpmAvailable
 import com.sukisu.ultra.ui.viewmodel.SettingsViewModel
 
 @Composable
 fun SettingPager(
     navigator: Navigator,
-    bottomInnerPadding: Dp
+    bottomInnerPadding: Dp,
+    isCurrentPage: Boolean = true,
 ) {
     val context = LocalContext.current
     val viewModel = viewModel<SettingsViewModel>()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val isKpmAvailable = rememberKpmAvailable()
-    val isSusfsSupported = getSuSFSStatus().equals("true", ignoreCase = true)
+    val latestIsCurrentPage by rememberUpdatedState(isCurrentPage)
+    val initialResumeHandled = rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(isCurrentPage) {
+        if (isCurrentPage) {
+            viewModel.refresh()
+        }
+    }
 
     LifecycleResumeEffect(Unit) {
-        viewModel.refresh()
+        if (initialResumeHandled.value && latestIsCurrentPage) {
+            viewModel.refresh()
+        }
+        initialResumeHandled.value = true
         onPauseOrDispose { }
     }
 
+
     val actions = SettingsScreenActions(
         onSetCheckUpdate = viewModel::setCheckUpdate,
+        onSetCheckCiUpdate = viewModel::setCheckCiUpdate,
         onSetCheckModuleUpdate = viewModel::setCheckModuleUpdate,
+        onSetAutoDeleteModuleZip = viewModel::setAutoDeleteModuleZip,
         onOpenTheme = { navigator.push(Route.ColorPalette) },
         onSetUiModeIndex = { index ->
             viewModel.setUiMode(if (index == 0) UiMode.Miuix.value else UiMode.Material.value)
@@ -43,17 +58,19 @@ fun SettingPager(
         onSetSuCompatMode = viewModel::setSuCompatMode,
         onSetKernelUmountEnabled = viewModel::setKernelUmountEnabled,
         onSetSelinuxHideEnabled = viewModel::setSelinuxHideEnabled,
+        onSetAvcSpoofEnabled = viewModel::setAvcSpoofEnabled,
+        onSetMountHideEnabled = viewModel::setMountHideEnabled,
         onSetSulogEnabled = viewModel::setSulogEnabled,
         onSetAdbRootEnabled = viewModel::setAdbRootEnabled,
+        onSetShellSuAdbOnlyEnabled = viewModel::setShellSuAdbOnlyEnabled,
         onSetDefaultUmountModules = viewModel::setDefaultUmountModules,
         onSetEnableWebDebugging = viewModel::setEnableWebDebugging,
         onSetAutoJailbreak = viewModel::setAutoJailbreak,
         onSetUseSoftReboot = viewModel::setUseSoftReboot,
         onOpenAbout = { navigator.push(Route.About) },
-        onSetAlternativeIcon = { enabled -> viewModel.setAlternativeIcon(context, enabled) },
         onOpenTools = { navigator.push(Route.Tool) },
-        onOpenKpm = { navigator.push(Route.Kpm) },
         onOpenSusfsConfig = { navigator.push(Route.SuSFS) },
+        onOpenExtensions = { navigator.push(Route.Extensions) },
     )
 
     when (LocalUiMode.current) {
@@ -61,15 +78,11 @@ fun SettingPager(
             uiState = uiState,
             actions = actions,
             bottomInnerPadding = bottomInnerPadding,
-            isKpmAvailable = isKpmAvailable,
-            isSusfsSupported = isSusfsSupported
         )
         UiMode.Material -> SettingPagerMaterial(
             uiState = uiState,
             actions = actions,
             bottomInnerPadding = bottomInnerPadding,
-            isKpmAvailable = isKpmAvailable,
-            isSusfsSupported = isSusfsSupported
         )
     }
 }

@@ -2,15 +2,29 @@ package com.sukisu.ultra.ui.screen.module
 
 import android.net.Uri
 import androidx.compose.runtime.Immutable
+import com.sukisu.ultra.data.registry.ExpectedFile
 import com.sukisu.ultra.data.model.Module
 import com.sukisu.ultra.data.model.ModuleUpdateInfo
 import com.sukisu.ultra.ui.component.SearchStatus
+
+enum class ModuleNameSort {
+    DEFAULT,
+    ASCENDING,
+    DESCENDING;
+
+    companion object {
+        fun fromStored(name: String?): ModuleNameSort =
+            entries.firstOrNull { it.name == name } ?: DEFAULT
+    }
+}
 
 sealed interface ModuleConfirmRequest {
     data class Update(
         val module: Module,
         val downloadUrl: String,
         val fileName: String,
+        /** Set when the update is a registry release: size + SHA-256 are enforced. */
+        val expected: ExpectedFile? = null,
     ) : ModuleConfirmRequest
 
     data class Uninstall(
@@ -25,6 +39,8 @@ data class ModuleConfirmDialogState(
     val content: String? = null,
     val markdown: Boolean = false,
     val html: Boolean = false,
+    /** Registry-hosted content: render with JavaScript off and network locked to the registry. */
+    val restricted: Boolean = false,
     val confirm: String? = null,
     val dismiss: String? = null,
 )
@@ -50,6 +66,13 @@ data class ModuleUiState(
     val searchResults: List<Module> = emptyList(),
     val sortEnabledFirst: Boolean = false,
     val sortActionFirst: Boolean = false,
+    val sortWebUiFirst: Boolean = false,
+    val sortZygiskFirst: Boolean = false,
+    val sortMetamoduleFirst: Boolean = false,
+    val sortNameOrder: ModuleNameSort = ModuleNameSort.DEFAULT,
+    val sortManual: Boolean = false,
+    /** Module IDs in the user-defined order, used while [sortManual] is active. */
+    val manualOrder: List<String> = emptyList(),
     val checkModuleUpdate: Boolean = true,
     val isSafeMode: Boolean = false,
     val magiskInstalled: Boolean = false,
@@ -72,6 +95,13 @@ data class ModuleActions(
     val onOpenRepo: () -> Unit,
     val onToggleSortActionFirst: () -> Unit,
     val onToggleSortEnabledFirst: () -> Unit,
+    val onToggleSortWebUiFirst: () -> Unit,
+    val onToggleSortZygiskFirst: () -> Unit,
+    val onToggleSortMetamoduleFirst: () -> Unit,
+    val onSetSortNameOrder: (ModuleNameSort) -> Unit,
+    val onToggleSortManual: () -> Unit,
+    val onMoveModule: (Module, Module) -> Unit,
+    val onCommitManualOrder: () -> Unit,
     val onOpenWebUi: (Module) -> Unit,
     val onToggleModule: (Module) -> Unit,
     val onUninstallModule: (Module) -> Unit,

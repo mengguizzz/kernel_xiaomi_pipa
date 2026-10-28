@@ -39,6 +39,7 @@ fun ColorPaletteScreen() {
         currentPaletteStyle = currentPaletteStyle,
         currentColorSpec = currentColorSpec,
         showFullStatus = uiState.showFullStatus,
+        hideHomeWarnings = uiState.hideHomeWarnings,
     )
     val actions = ColorPaletteScreenActions(
         onBack = dropUnlessResumed { navigator.pop() },
@@ -57,8 +58,13 @@ fun ColorPaletteScreen() {
             KernelSUApplication.setEnableOnBackInvokedCallback(context.applicationInfo, it)
             activity?.recreate()
         },
+        onSetEnableSwipeDismiss = viewModel::setEnableSwipeDismiss,
+        onSetPagerInterceptionMode = viewModel::setPagerInterceptionMode,
         onSetPageScale = viewModel::setPageScale,
+        onSetModuleDescriptionMaxLines = viewModel::setModuleDescriptionMaxLines,
         onSetShowFullStatus = viewModel::setShowFullStatus,
+        onSetHideHomeWarnings = viewModel::setHideHomeWarnings,
+        onSetAlternativeIcon = { enabled -> viewModel.setAlternativeIcon(context, enabled) },
     )
 
     when (LocalUiMode.current) {

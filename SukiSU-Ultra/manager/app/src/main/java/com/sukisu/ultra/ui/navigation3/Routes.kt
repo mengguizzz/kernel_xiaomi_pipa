@@ -2,21 +2,24 @@ package com.sukisu.ultra.ui.navigation3
 
 import android.net.Uri
 import android.os.Parcelable
-import androidx.navigation3.runtime.NavKey
 import kotlinx.parcelize.Parcelize
 import kotlinx.serialization.Serializable
 import com.sukisu.ultra.ui.screen.flash.FlashIt
 import com.sukisu.ultra.ui.screen.modulerepo.RepoModuleArg
+import com.sukisu.ultra.ui.screen.scriptrun.ScriptRunArg
 import com.sukisu.ultra.ui.util.FlashItSerializer
 import com.sukisu.ultra.ui.util.RepoModuleArgSerializer
+import com.sukisu.ultra.ui.util.ScriptRunArgSerializer
 import com.sukisu.ultra.ui.util.TemplateInfoSerializer
 import com.sukisu.ultra.ui.util.UriSerializer
 import com.sukisu.ultra.ui.viewmodel.TemplateViewModel
+import top.yukonga.miuix.kmp.nav.core.NavKey
 
 /**
- * Type-safe navigation keys for Navigation3.
+ * Type-safe navigation keys for miuix-nav.
  * Each destination is a NavKey (data object/data class) and can be saved/restored in the back stack.
  */
+@Serializable
 sealed interface Route : NavKey, Parcelable {
     @Parcelize
     @Serializable
@@ -87,6 +90,10 @@ sealed interface Route : NavKey, Parcelable {
 
     @Parcelize
     @Serializable
+    data class ScriptRun(@Serializable(with = ScriptRunArgSerializer::class) val arg: ScriptRunArg) : Route
+
+    @Parcelize
+    @Serializable
     data class KernelFlash(@Serializable(with = UriSerializer::class) val kernelUri: Uri, val selectedSlot: String?, val kpmPatchEnabled: Boolean, val kpmUndoPatch: Boolean) : Route
 
     @Parcelize
@@ -104,4 +111,28 @@ sealed interface Route : NavKey, Parcelable {
     @Parcelize
     @Serializable
     data object UmountManager: Route
+
+    /** Kernel module blacklist (block_modules=) overview. */
+    @Parcelize
+    @Serializable
+    data object KernelModules : Route
+
+    @Parcelize
+    @Serializable
+    data object DynamicManagers : Route
+
+    /** Extension subsystem overview (KPM, CPU spoof, umount paths, dynamic manager). */
+    @Parcelize
+    @Serializable
+    data object Extensions : Route
+
+    /** CPU identity spoofing detail form. */
+    @Parcelize
+    @Serializable
+    data object CpuSpoof : Route
+
+    /** KernelSU reported-version overrides detail page. */
+    @Parcelize
+    @Serializable
+    data object VersionSpoof : Route
 }
