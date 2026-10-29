@@ -163,9 +163,12 @@ struct nvt_ts_data {
 #if defined(NVT_PEN_CONNECT_STRATEGY)
 	struct work_struct pen_charge_state_change_work;
 	struct notifier_block pen_charge_state_notifier;
+	int pen_mode_value;
 	bool pen_bluetooth_connect;
 	bool pen_charge_connect;
 	bool game_mode_enable;
+	int pen_count;
+	bool pen_shield_flag;
 	struct device *dev;
 #endif
 	struct mutex pen_switch_lock;

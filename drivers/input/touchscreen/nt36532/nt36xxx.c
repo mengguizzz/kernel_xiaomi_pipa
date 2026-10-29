@@ -1228,7 +1228,12 @@ int switch_pen_input_device(void) {
 
 	msleep(35);
 	mutex_lock(&ts->pen_switch_lock);
-	enable = ((ts->pen_bluetooth_connect) && !(ts->pen_charge_connect) && !(ts->game_mode_enable));
+	/*
+	 * Track connection counts and generation-one shielding from the stock
+	 * pipa-t-oss driver instead of treating every BLE event as a new state.
+	 */
+	enable = ((ts->pen_bluetooth_connect) &&
+		  !(ts->pen_charge_connect) && !(ts->game_mode_enable));
 	NVT_LOG("pen_bluetooth_connect is %d, pen_charge_connect is %d, game_mode_enable %d, %s pen input device\n",
 	ts->pen_bluetooth_connect, ts->pen_charge_connect, ts->game_mode_enable, enable ? "ENABLE" : "DISABLE");
 	//---set xdata index to EVENT BUF ADDR---
@@ -1243,7 +1248,9 @@ int switch_pen_input_device(void) {
 	buf[2] = !!enable;
 	ret = CTP_SPI_WRITE(ts->client, buf, 3);
 	if (ret < 0)
-		NVT_ERR("set pen %s failed!\n", enable ? "DISABLE" : "ENABLE");
+		NVT_ERR("set pen %s failed!\n", enable ? "ENABLE" : "DISABLE");
+
+	update_pen_connect_strategy_value(!!enable);
 
 nvt_set_pen_enable_out:
 	mutex_unlock(&ts->pen_switch_lock);
@@ -2302,7 +2309,7 @@ static void nvt_init_touchmode_data(void)
 	xiaomi_touch_interfaces.touch_mode[Touch_Resist_RF][GET_CUR_VALUE] = 0;
 
 	/* Stylus */
-	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MAX_VALUE] = 18;
+	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MAX_VALUE] = 255;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_MIN_VALUE] = -1;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_DEF_VALUE] = 0;
 	xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][SET_CUR_VALUE] = 0;
@@ -2466,8 +2473,10 @@ static void nvt_set_gesture_mode(void)
 static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 {
 	if (nvt_mode >= Touch_Mode_NUM || nvt_mode < 0) {
-		NVT_ERR("%s, nvt mode is error:%d", __func__, nvt_mode);
-		return -EINVAL;
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, nvt_mode);
+		return 0;
 	}
 
 	NVT_LOG("mode:%d, value:%d", nvt_mode, nvt_value);
@@ -2475,17 +2484,38 @@ static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 		ts-> db_wakeup = nvt_value ? (ts-> db_wakeup | 0x01) : (ts-> db_wakeup & 0xFE);
 		nvt_set_gesture_mode();
 		return 0;
-	} else if (nvt_mode == Touch_Pen_ENABLE && ts && nvt_value >= 0) {
+	} else if (nvt_mode == Touch_Pen_ENABLE && ts) {
 #if defined(NVT_PEN_CONNECT_STRATEGY)
-		if (!!(nvt_value >> 4))
-			ts->pen_bluetooth_connect = 1;
-		else
-			ts->pen_bluetooth_connect = 0;
+		ts->pen_mode_value = nvt_value;
+		if (nvt_value >= 0 && (nvt_value >> 4)) {
+			if ((nvt_value & 0x0F) == 2)
+				ts->pen_count++;
+			else if ((nvt_value & 0x0F) == 1) {
+				ts->pen_shield_flag = true;
+				NVT_LOG("Xiaomi stylus Generation one connect, shield pen connection\n");
+			}
+		} else {
+			if ((nvt_value & 0x0F) == 2 && ts->pen_count > 0)
+				ts->pen_count--;
+			else if ((nvt_value & 0x0F) == 1) {
+				ts->pen_shield_flag = false;
+				NVT_LOG("Xiaomi stylus Generation one disconnect, open pen connection\n");
+			}
+		}
+
+		ts->pen_bluetooth_connect =
+			!ts->pen_shield_flag && ts->pen_count > 0;
 
 		ts->db_wakeup = ts->db_wakeup & 0xFD; /* close off screen short hand by defalut */
 		dsi_panel_doubleclick_enable(!!ts->db_wakeup);
-		NVT_LOG("nvt_value is 0x%02X, pen status is %s, pen id is %d, pen_bluetooth_connect is %d, db_wakeup is 0x%02X",
-					nvt_value, (nvt_value >> 4) ? "connect":"disconnct", nvt_value & 0x0F, ts->pen_bluetooth_connect, ts->db_wakeup);
+		NVT_LOG("nvt_value is 0x%02X, pen status is %s, pen id is %d, pen_bluetooth_connect is %d, pen_count is %d, db_wakeup is 0x%02X",
+			nvt_value, ts->pen_bluetooth_connect ? "connect" : "disconnect",
+			nvt_value & 0x0F, ts->pen_bluetooth_connect, ts->pen_count,
+			ts->db_wakeup);
+		xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][SET_CUR_VALUE] =
+			nvt_value;
+		xiaomi_touch_interfaces.touch_mode[Touch_Pen_ENABLE][GET_CUR_VALUE] =
+			nvt_value;
 #endif
 
 		switch_pen_input_device();
@@ -2523,12 +2553,14 @@ static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 
 static int nvt_get_mode_value(int mode, int value_type)
 {
-	int value = -1;
+	int value = 0;
 
 	if (mode < Touch_Mode_NUM && mode >= 0)
 		value = xiaomi_touch_interfaces.touch_mode[mode][value_type];
 	else
-		NVT_ERR("%s, don't support\n", __func__);
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, mode);
 
 	return value;
 }
@@ -2541,7 +2573,13 @@ static int nvt_get_mode_all(int mode, int *value)
 		value[2] = xiaomi_touch_interfaces.touch_mode[mode][GET_MIN_VALUE];
 		value[3] = xiaomi_touch_interfaces.touch_mode[mode][GET_MAX_VALUE];
 	} else {
-		NVT_ERR("%s, don't support\n",  __func__);
+		value[0] = 0;
+		value[1] = 0;
+		value[2] = 0;
+		value[3] = 0;
+		printk_ratelimited(KERN_WARNING
+			"%s: ignoring unsupported HyperOS touch mode %d\n",
+			__func__, mode);
 	}
 	NVT_LOG("%s, mode:%d, value:%d:%d:%d:%d\n", __func__, mode, value[0],
 					value[1], value[2], value[3]);
@@ -3289,9 +3327,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 #endif
 
 #if defined(NVT_PEN_CONNECT_STRATEGY)
+	ts->pen_mode_value = -1;
 	ts->pen_bluetooth_connect = 0;
 	ts->pen_charge_connect = false;
 	ts->game_mode_enable = 0;
+	ts->pen_count = 0;
+	ts->pen_shield_flag = false;
 	mutex_init(&ts->pen_switch_lock);
 	INIT_WORK(&ts->pen_charge_state_change_work, nvt_pen_charge_state_change_work);
 	ts->pen_charge_state_notifier.notifier_call = nvt_pen_charge_state_notifier_callback;

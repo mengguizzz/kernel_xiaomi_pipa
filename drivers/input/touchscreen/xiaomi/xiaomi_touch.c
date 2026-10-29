@@ -1,4 +1,5 @@
 #include "xiaomi_touch.h"
+#include <linux/kobject.h>
 
 static struct xiaomi_touch_pdata *touch_pdata;
 int mi_log_level;
@@ -141,6 +142,8 @@ static struct xiaomi_touch xiaomi_touch_dev = {
 	.mutex = __MUTEX_INITIALIZER(xiaomi_touch_dev.mutex),
 	.palm_mutex = __MUTEX_INITIALIZER(xiaomi_touch_dev.palm_mutex),
 	.psensor_mutex = __MUTEX_INITIALIZER(xiaomi_touch_dev.psensor_mutex),
+	.pen_connect_strategy_mutex =
+		__MUTEX_INITIALIZER(xiaomi_touch_dev.pen_connect_strategy_mutex),
 	.wait_queue = __WAIT_QUEUE_HEAD_INITIALIZER(xiaomi_touch_dev.wait_queue),
 };
 
@@ -488,6 +491,40 @@ static ssize_t resolution_factor_show(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%d", factor);
 }
 
+int update_pen_connect_strategy_value(bool pen_active)
+{
+	char *envp[2];
+
+	mutex_lock(&xiaomi_touch_dev.pen_connect_strategy_mutex);
+	if (!touch_pdata) {
+		mutex_unlock(&xiaomi_touch_dev.pen_connect_strategy_mutex);
+		return -ENODEV;
+	}
+
+	touch_pdata->pen_active = pen_active;
+	envp[0] = "SOURCE=sysfs";
+	envp[1] = NULL;
+	kobject_uevent_env(&xiaomi_touch_dev.dev->kobj, KOBJ_CHANGE, envp);
+	sysfs_notify(&xiaomi_touch_dev.dev->kobj, NULL,
+		     "pen_connect_strategy");
+	mutex_unlock(&xiaomi_touch_dev.pen_connect_strategy_mutex);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(update_pen_connect_strategy_value);
+
+static ssize_t pen_connect_strategy_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct xiaomi_touch_pdata *pdata = dev_get_drvdata(dev);
+
+	if (!pdata)
+		return -ENODEV;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", pdata->pen_active);
+}
+
 static DEVICE_ATTR(palm_sensor, (S_IRUGO | S_IWUSR | S_IWGRP), palm_sensor_show,
 		   palm_sensor_store);
 
@@ -511,6 +548,7 @@ static DEVICE_ATTR(partial_diff_data, (S_IRUGO | S_IWUSR | S_IWGRP),
 #endif
 
 static DEVICE_ATTR(resolution_factor, 0644, resolution_factor_show, NULL);
+static DEVICE_ATTR(pen_connect_strategy, 0444, pen_connect_strategy_show, NULL);
 
 static struct attribute *touch_attr_group[] = {
 	&dev_attr_palm_sensor.attr,	  &dev_attr_p_sensor.attr,
@@ -520,7 +558,8 @@ static struct attribute *touch_attr_group[] = {
 #if XIAOMI_ROI
 	&dev_attr_partial_diff_data.attr,
 #endif
-	&dev_attr_resolution_factor.attr, NULL,
+	&dev_attr_resolution_factor.attr,
+	&dev_attr_pen_connect_strategy.attr, NULL,
 };
 
 static const struct of_device_id xiaomi_touch_of_match[] = {
