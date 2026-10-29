@@ -410,6 +410,8 @@ const char *security_get_initial_sid_context(u32 sid);
  * status notifier using mmap interface
  */
 extern struct page *selinux_kernel_status_page(struct selinux_state *state);
+struct file_operations;
+struct file_operations *selinux_get_status_ops(void);
 
 #define SELINUX_KERNEL_STATUS_VERSION	1
 struct selinux_kernel_status {
