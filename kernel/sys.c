@@ -1264,21 +1264,21 @@ static int override_release(char __user *release, size_t len)
 static __always_inline bool fake_uname_task(void)
 {
 	const char *comm = current->comm;
+	uid_t uid = current_uid().val;
 
 	/*
-	 * Only the real system daemons (root) qualify.  Any app can rename its own
-	 * comm to "bpfloader" via prctl(PR_SET_NAME) and then compare uname()
-	 * before/after the rename to detect this fake (Hunter does exactly that:
-	 * it renames itself to "bpfloader" and reports "detected linux uname
-	 * spoofing" when the release changes).
+	 * HyperOS applications and their main processes see the configured newer
+	 * release.  Root BPF/netd daemons remain covered because they use uname()
+	 * for version-gated kernel paths.
 	 */
-	if (current_uid().val != 0)
-		return false;
+	if (uid >= 1000 || !strcmp(comm, "main"))
+		return true;
 
-	return !strcmp(comm, "bpfloader") ||
+	return uid == 0 &&
+	       (!strcmp(comm, "bpfloader") ||
 	       !strcmp(comm, "netbpfload") ||
 	       !strcmp(comm, "netd") ||
-	       strstarts(comm, "uprobestats");
+	       strstarts(comm, "uprobestats"));
 }
 #endif
 
